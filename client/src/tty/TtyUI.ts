@@ -103,7 +103,6 @@ export class TtyUI {
     this.bg.backgroundOpacity = 0.95;
     this.bg.zIndex = 999;
 
-    // 输出区滚动框（顶部留 50px 给 dock，底部留 32px 给 input）
     this.scrollBox = UiScrollBox.create();
     this.scrollBox.parent = this.bg;
     this.scrollBox.anchor.x = 0;
@@ -195,6 +194,17 @@ export class TtyUI {
   private setupRemoteChannel(): void {
     remoteChannel.onClientEvent((args: unknown) => {
       const msg = args as Record<string, unknown>;
+
+      // 流式数据行 — 实时追加（可能含多行）
+      if (msg?.type === 'tty-stream') {
+        const lines = String(msg.data).split('\n');
+        for (const l of lines) {
+          this.appendLine(l, COLOR_OUTPUT);
+        }
+        return;
+      }
+
+      // 完整结果
       if (msg?.type !== 'tty-result') return;
 
       const result = msg.result as {
@@ -214,7 +224,7 @@ export class TtyUI {
   // ---- 结果渲染（匹配 Cli.ts 的输出格式）------------------------------------
 
   private printResult(data: unknown): void {
-    if (data === null) return;
+    if (data === null || data === undefined) return;
 
     if (typeof data === 'string') {
       for (const line of data.split('\n')) {

@@ -542,6 +542,56 @@ export class FabricFS {
   }
 
   /**
+   * 递归删除文件或目录（rm -rf）。
+   * - 路径不存在 → 静默返回
+   * - 文件 → 清理分块后从父目录移除
+   * - 目录 → 递归删除所有子项后从父目录移除
+   */
+  async rimraf(path: string): Promise<void> {
+    if (path === '/') return; // 根目录不可删除
+
+    const id = await this.resolve(path);
+    if (id === null) return; // ENOENT → 静默忽略（类似 rm -f）
+
+    const inode = await this.getINode(id);
+
+    if (inode.type === 'file') {
+      // 清理文件分块
+      if (inode.chunkCount) {
+        await this.clearChunks(id, inode.chunkCount);
+      }
+      // 从父目录移除
+      const { parentId, name } = await this.resolveParent(path);
+      await this.storage.update(K_DIR(parentId), (prev) => {
+        if (!prev?.value) return prev?.value as unknown as JSONValue;
+        const cur = prev.value as unknown as DirEntry[];
+        const idx = cur.findIndex((e) => e.name === name);
+        if (idx !== -1) cur.splice(idx, 1);
+        return cur as unknown as JSONValue;
+      });
+      return;
+    }
+
+    // 目录：先递归删除子项
+    const entries = await this.getDirEntries(id);
+    for (const entry of entries) {
+      const childPath =
+        path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
+      await this.rimraf(childPath);
+    }
+
+    // 从父目录移除自身
+    const { parentId, name } = await this.resolveParent(path);
+    await this.storage.update(K_DIR(parentId), (prev) => {
+      if (!prev?.value) return prev?.value as unknown as JSONValue;
+      const cur = prev.value as unknown as DirEntry[];
+      const idx = cur.findIndex((e) => e.name === name);
+      if (idx !== -1) cur.splice(idx, 1);
+      return cur as unknown as JSONValue;
+    });
+  }
+
+  /**
    * 重命名 / 移动文件或目录。
    *
    * - 源路径不存在 → 抛 ENOENT

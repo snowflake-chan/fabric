@@ -101,6 +101,31 @@ async function buildTreeData(
   return nodes;
 }
 
+// ---- 流式 tree（逐行 emit）---------------------------------------------------
+
+async function streamTree(
+  fs: FabricFS,
+  dirPath: string,
+  prefix: string,
+  emit: (line: string) => Promise<void>
+): Promise<void> {
+  const entries = await fs.readdir(dirPath);
+  for (let i = 0; i < entries.length; i++) {
+    const isLast = i === entries.length - 1;
+    const name = entries[i];
+    const childPath = dirPath === '/' ? `/${name}` : `${dirPath}/${name}`;
+    const st = await fs.stat(childPath);
+
+    const connector = isLast ? '└─ ' : '├─ ';
+    const display = st?.type === 'dir' ? `${name}/` : name;
+    await emit(`${prefix}${connector}${display}`);
+
+    if (st?.type === 'dir') {
+      await streamTree(fs, childPath, prefix + (isLast ? '   ' : '│  '), emit);
+    }
+  }
+}
+
 // ---- Shell -----------------------------------------------------------------
 
 type ShellHandler = (...args: string[]) => Promise<ShellResult>;
@@ -173,11 +198,35 @@ export function createShell(fs: FabricFS) {
       });
     },
 
-    async rm(path) {
+    async rm(...args) {
       return safeRun(async () => {
-        const target = resolvePath(cwd, path);
-        await fs.unlink(target);
-        return target;
+        let recursive = false;
+        let force = false;
+        const paths: string[] = [];
+        for (const arg of args) {
+          if (arg.startsWith('-')) {
+            if (arg.includes('r')) recursive = true;
+            if (arg.includes('f')) force = true;
+          } else {
+            paths.push(arg);
+          }
+        }
+        if (!paths.length) throw new Error('Usage: rm [-rf] <path>');
+        const deleted: string[] = [];
+        for (const p of paths) {
+          const target = resolvePath(cwd, p);
+          try {
+            if (recursive || force) {
+              await fs.rimraf(target);
+            } else {
+              await fs.unlink(target);
+            }
+            deleted.push(target);
+          } catch (err) {
+            if (!force) throw err;
+          }
+        }
+        return deleted;
       });
     },
 
@@ -270,5 +319,52 @@ export function createShell(fs: FabricFS) {
     return handler(...cmdArgs);
   }
 
-  return { exec };
+  // ── execStream：流式执行（逐行回调） ─────────────────────────────────────
+
+  async function execStream(
+    input: string,
+    emit: (line: string) => Promise<void>
+  ): Promise<ShellResult> {
+    const trimmed = input.trim();
+    if (!trimmed) return { ok: true, data: undefined };
+
+    const tokens = tokenize(trimmed);
+    const cmdName = tokens[0]?.toLowerCase();
+    const cmdArgs = tokens.slice(1);
+
+    try {
+      switch (cmdName) {
+        case 'tree': {
+          const target = resolvePath(cwd, cmdArgs[0] || '.');
+          await emit(`tree ${cmdArgs[0] || '.'}`);
+          await streamTree(fs, target, '', emit);
+          return { ok: true, data: undefined };
+        }
+        case 'ls': {
+          const target = resolvePath(cwd, cmdArgs[0] || '.');
+          const entries = await fs.readdir(target);
+          for (const name of entries) {
+            const st = await fs.stat(
+              target === '/' ? `/${name}` : `${target}/${name}`
+            );
+            await emit(st?.type === 'dir' ? `${name}/` : name);
+          }
+          return { ok: true, data: undefined };
+        }
+        default: {
+          const handler = handlers[cmdName];
+          if (!handler)
+            return { ok: false, error: `unknown command: ${cmdName}` };
+          return handler(...cmdArgs);
+        }
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  return { exec, execStream };
 }
