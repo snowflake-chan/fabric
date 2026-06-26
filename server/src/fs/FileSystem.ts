@@ -20,6 +20,8 @@
 interface FSMeta {
   rootInode: number;
   nextInode: number;
+  /** 已释放可复用的 inode ID 池 */
+  freeInodes?: number[];
 }
 
 interface INode {
@@ -149,11 +151,35 @@ export class FabricFS {
       const meta: FSMeta = prev?.value
         ? (prev.value as unknown as FSMeta)
         : { rootInode: ROOT_INODE, nextInode: ROOT_INODE + 1 };
-      id = meta.nextInode++;
+      // 优先复用已释放的 inode
+      if (meta.freeInodes && meta.freeInodes.length > 0) {
+        id = meta.freeInodes.pop()!;
+      } else {
+        id = meta.nextInode++;
+      }
       return meta as unknown as JSONValue;
     });
     this.invalidateMeta();
     return id;
+  }
+
+  /** 释放 inode：清理 KV 条目并回收编号 */
+  private async freeInode(id: number): Promise<void> {
+    // 清理 inode 数据
+    try {
+      await this.storage.remove(K_INODE(id));
+    } catch {
+      // 可能已被其他操作删除
+    }
+    // 回收编号到空闲池
+    await this.storage.update(K_META, (prev) => {
+      if (!prev?.value) return prev?.value as unknown as JSONValue;
+      const meta = prev.value as unknown as FSMeta;
+      if (!meta.freeInodes) meta.freeInodes = [];
+      meta.freeInodes.push(id);
+      return meta as unknown as JSONValue;
+    });
+    this.invalidateMeta();
   }
 
   /** 标准化路径 → segments。空数组表示根目录。 */
@@ -295,6 +321,20 @@ export class FabricFS {
       ctime: inode.ctime,
       nlinks: inode.nlinks,
     };
+  }
+
+  /**
+   * 修改文件或目录的权限位。
+   * - 路径不存在 → 抛 ENOENT
+   */
+  async chmod(path: string, mode: number): Promise<void> {
+    const id = await this.resolve(path);
+    if (id === null) throw new Error(`ENOENT: ${path} not found`);
+
+    const inode = await this.getINode(id);
+    inode.mode = mode;
+    inode.ctime = Date.now();
+    await this.setINode(id, inode);
   }
 
   /**
@@ -485,29 +525,30 @@ export class FabricFS {
     const { parentId, name } = await this.resolveParent(path);
 
     // 先 look up 文件 inode ID，以便后续清理分块
-    const entries = await this.getDirEntries(parentId);
-    const entry = entries.find((e) => e.name === name);
+    const before = await this.getDirEntries(parentId);
+    const first = before.find((e) => e.name === name);
 
-    // 从父目录移除条目（原子操作）
+    // 从父目录移除所有同名条目（防止幽灵文件）
     await this.storage.update(K_DIR(parentId), (prev) => {
       if (!prev?.value) throw new Error(`ENOENT: ${path} not found`);
       const cur = prev.value as unknown as DirEntry[];
-      const idx = cur.findIndex((e) => e.name === name);
-      if (idx === -1) throw new Error(`ENOENT: ${path} not found`);
-      cur.splice(idx, 1);
-      return cur as unknown as JSONValue;
+      const filtered = cur.filter((e) => e.name !== name);
+      if (filtered.length === cur.length)
+        throw new Error(`ENOENT: ${path} not found`);
+      return filtered as unknown as JSONValue;
     });
 
-    // 如果文件存在且有分块，清理它们
-    if (entry) {
+    // 清理文件分块与 inode
+    if (first) {
       try {
-        const inode = await this.getINode(entry.inode);
+        const inode = await this.getINode(first.inode);
         if (inode.chunkCount) {
-          await this.clearChunks(entry.inode, inode.chunkCount);
+          await this.clearChunks(first.inode, inode.chunkCount);
         }
       } catch {
         // inode 可能已被其他操作删除，忽略
       }
+      await this.freeInode(first.inode);
     }
   }
 
@@ -534,11 +575,18 @@ export class FabricFS {
     await this.storage.update(K_DIR(parentId), (prev) => {
       if (!prev?.value) throw new Error(`ENOENT: ${path} not found`);
       const cur = prev.value as unknown as DirEntry[];
-      const idx = cur.findIndex((e) => e.name === name);
-      if (idx === -1) throw new Error(`ENOENT: ${path} not found`);
-      cur.splice(idx, 1);
-      return cur as unknown as JSONValue;
+      const filtered = cur.filter((e) => e.name !== name);
+      if (filtered.length === cur.length)
+        throw new Error(`ENOENT: ${path} not found`);
+      return filtered as unknown as JSONValue;
     });
+    // 清理目录条目 KV 并回收 inode
+    try {
+      await this.storage.remove(K_DIR(id));
+    } catch {
+      // 可能已被清理，忽略
+    }
+    await this.freeInode(id);
   }
 
   /**
@@ -560,15 +608,15 @@ export class FabricFS {
       if (inode.chunkCount) {
         await this.clearChunks(id, inode.chunkCount);
       }
-      // 从父目录移除
+      // 从父目录移除（删所有同名条目，防幽灵）
       const { parentId, name } = await this.resolveParent(path);
       await this.storage.update(K_DIR(parentId), (prev) => {
         if (!prev?.value) return prev?.value as unknown as JSONValue;
         const cur = prev.value as unknown as DirEntry[];
-        const idx = cur.findIndex((e) => e.name === name);
-        if (idx !== -1) cur.splice(idx, 1);
-        return cur as unknown as JSONValue;
+        const filtered = cur.filter((e) => e.name !== name);
+        return filtered as unknown as JSONValue;
       });
+      await this.freeInode(id);
       return;
     }
 
@@ -580,15 +628,22 @@ export class FabricFS {
       await this.rimraf(childPath);
     }
 
-    // 从父目录移除自身
+    // 清理目录条目 KV
+    try {
+      await this.storage.remove(K_DIR(id));
+    } catch {
+      // 可能已被清理，忽略
+    }
+
+    // 从父目录移除自身（删所有同名条目，防幽灵）
     const { parentId, name } = await this.resolveParent(path);
     await this.storage.update(K_DIR(parentId), (prev) => {
       if (!prev?.value) return prev?.value as unknown as JSONValue;
       const cur = prev.value as unknown as DirEntry[];
-      const idx = cur.findIndex((e) => e.name === name);
-      if (idx !== -1) cur.splice(idx, 1);
-      return cur as unknown as JSONValue;
+      const filtered = cur.filter((e) => e.name !== name);
+      return filtered as unknown as JSONValue;
     });
+    await this.freeInode(id);
   }
 
   /**

@@ -15,17 +15,17 @@ FabricFS 是一个基于游戏引擎 **ArenaPro（Box3）** 的 `GameDataStorage
 ## 架构
 
 ```
-server/                         客户端（引擎服务端）
+server/                         服务端（引擎）
   src/App.ts                    — 入口，组装所有模块
   src/fs/
     FileSystem.ts               — 文件系统核心（INode + 分块 KV 存储）
-    DebugShell.ts               — shell 逻辑层（命令解析 + 执行）
-    Cli.ts                      — 终端渲染（console 输出层）
     RateLimiter.ts              — GameDataStorage 限流包装（token bucket）
+  src/shell/
+    DebugShell.ts               — shell 逻辑（命令解析 + cout 输出）
+    Cli.ts                      — 终端界面（console 层）
     TtyBridge.ts                — RemoteChannel 桥接（服务端 ←→ 客户端）
-    StressTest.ts               — 压力测试
 
-client/                         客户端（引擎客户端，浏览器 UI）
+client/                         客户端（浏览器 UI）
   src/clientApp.ts              — 入口
   src/tty/TtyUI.ts              — TTY 终端 UI（ClientUI 实现）
 
@@ -151,12 +151,33 @@ C:{id}:{n}   →  第 n 个数据分块                       大文件分块
 
 - 读操作（get, list）: 20 ops/s
 - 写操作（set, update, remove, increment, destroy）: 10 ops/s
-- 通过 Proxy（已替换为显式包装器）实现，0 `any`
 
 ## 流式输出
 
-`DebugShell.execStream()` 支持流式命令（`tree`, `ls`），通过 `emit(line)` 回调逐行输出。`TtyBridge` 攒批发送（每 5 行或 50ms flush），每次 flush 后 `setTimeout(0)` yield 给引擎刷新事件队列。
+所有 shell 命令通过统一的 `Cout` 回调逐行输出：
 
-## CLAUDE.md
+```typescript
+type Cout = (line: string) => Promise<void>;
+```
 
-本文由 Claude 根据项目结构和代码约定自动生成。保持更新。
+- TTY：`Cout` → RemoteChannel `tty-stream` 事件（攒批 5 行 / 50ms flush + yield）
+- CLI：`Cout` → `console.log`
+
+handler 只调 `await cout(line)`，不返回数据。`ShellResult` 简化为 `{ok:true}` 或 `{ok:false, error}`。
+
+## 目录结构（2025-06 重构后）
+
+```
+server/src/
+  App.ts                — 入口
+  fs/
+    FileSystem.ts       — 文件系统核心
+    RateLimiter.ts      — 存储限流
+  shell/
+    DebugShell.ts       — shell 逻辑（handler + cout）
+    Cli.ts              — 终端界面（console）
+    TtyBridge.ts        — RemoteChannel 桥接
+client/src/
+  clientApp.ts          — 客户端入口
+  tty/TtyUI.ts          — TTY 终端 UI
+```

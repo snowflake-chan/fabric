@@ -64,6 +64,8 @@ const COLOR_DIM = Vec3.create({ r: 100, g: 100, b: 100 });
 
 export class TtyUI {
   private scrollBox!: UiScrollBox;
+  /** 内容容器 — 撑开 scrollbox 的内容高度以启用滚动 */
+  private scrollContent!: UiBox;
   private inputField!: UiInput;
   private bg!: UiBox;
   private inputBg!: UiBox;
@@ -72,6 +74,7 @@ export class TtyUI {
   private readonly LINE_HEIGHT = 20;
   private readonly MAX_LINES = 500;
   private scrollBoxHeight = 0;
+  private inputBusy = false;
 
   constructor() {
     this.buildUI();
@@ -113,6 +116,15 @@ export class TtyUI {
     this.scrollBox.backgroundOpacity = 0;
     this.scrollBox.zIndex = 1000;
     this.scrollBox.pointerEventBehavior = PointerEventBehavior.ENABLE;
+
+    // 内容容器 — 撑开 scrollbox 的可滚动范围
+    this.scrollContent = UiBox.create();
+    this.scrollContent.parent = this.scrollBox;
+    this.scrollContent.anchor.x = 0;
+    this.scrollContent.anchor.y = 0;
+    setCoord2(this.scrollContent.position, { x: 0, y: 0 }, { x: 0, y: 0 });
+    setCoord2(this.scrollContent.size, { x: 0, y: 0 }, { x: 1, y: 0 });
+    this.scrollContent.backgroundOpacity = 0;
 
     // 输入栏底条（贴底）
     this.inputBg = UiBox.create();
@@ -164,6 +176,7 @@ export class TtyUI {
   private setupInput(): void {
     // 方式1：轮询检测输入文本中的换行符（部分平台 Enter → \n）
     setInterval(() => {
+      if (this.inputBusy) return;
       const text = this.inputField.textContent;
       if (text.includes('\n')) {
         const parts = text.split('\n');
@@ -175,6 +188,7 @@ export class TtyUI {
 
     // 方式2：失焦时捕获（部分平台 Enter → blur）
     this.inputField.events.on('blur', () => {
+      if (this.inputBusy) return;
       const text = this.inputField.textContent.trim();
       if (text) {
         this.inputField.textContent = '';
@@ -184,9 +198,13 @@ export class TtyUI {
   }
 
   private executeCommand(cmd: string): void {
+    this.inputBusy = true;
     this.appendLine(`$ ${cmd}`, COLOR_PROMPT);
     remoteChannel.sendServerEvent({ type: 'tty-cmd', cmd });
-    setTimeout(() => this.inputField.focus(), 50);
+    setTimeout(() => {
+      this.inputField.focus();
+      this.inputBusy = false;
+    }, 100);
   }
 
   // ---- 远程通信 --------------------------------------------------------------
@@ -326,7 +344,7 @@ export class TtyUI {
     const yPos = idx * this.LINE_HEIGHT;
 
     const line = UiText.create();
-    line.parent = this.scrollBox;
+    line.parent = this.scrollContent;
     line.textContent = text;
     line.textFontFamily = UITextFontFamily.CodeNewRomanBold;
     line.textFontSize = 14;
@@ -366,11 +384,15 @@ export class TtyUI {
       }
     }
 
+    // 更新内容容器高度，撑开 scrollbox 的滚动范围
+    this.scrollContent.size.offset.y = this.lines.length * this.LINE_HEIGHT;
+
     // 自动滚到底部
-    const totalContent = this.lines.length * this.LINE_HEIGHT;
-    if (totalContent > this.scrollBoxHeight) {
+    if (this.lines.length * this.LINE_HEIGHT > this.scrollBoxHeight) {
       this.scrollBox.scrollPosition.y =
-        totalContent - this.scrollBoxHeight + this.LINE_HEIGHT;
+        this.lines.length * this.LINE_HEIGHT -
+        this.scrollBoxHeight +
+        this.LINE_HEIGHT;
     }
   }
 

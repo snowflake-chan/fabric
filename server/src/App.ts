@@ -1,7 +1,7 @@
 import { FabricFS } from '@src/fs/FileSystem';
-import { createCLI } from '@src/fs/Cli';
+import { createCLI } from '@src/shell/Cli';
 import { rateLimit } from '@src/fs/RateLimiter';
-import { createTtyBridge } from '@src/fs/TtyBridge';
+import { createTtyBridge } from '@src/shell/TtyBridge';
 
 console.clear();
 
