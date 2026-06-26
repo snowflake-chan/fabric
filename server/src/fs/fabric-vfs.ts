@@ -238,4 +238,10 @@ export class FabricVFS implements IFileSystem {
     if (!r) throw new Error(`ENOENT: ${path}`);
     return r.fs.chmod(r.inner, mode);
   }
+
+  async chown(path: string, owner: number): Promise<void> {
+    const r = this.resolve(path);
+    if (!r) throw new Error(`ENOENT: ${path}`);
+    return r.fs.chown(r.inner, owner);
+  }
 }

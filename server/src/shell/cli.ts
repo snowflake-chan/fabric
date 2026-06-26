@@ -16,18 +16,20 @@ import { type FabricVFS } from '../fs/fabric-vfs';
 
 // ---- CLI 工厂 ---------------------------------------------------------------
 
+type ExtraHandler = (cout: Cout, ...args: string[]) => Promise<void>;
+
 export function createCLI(
   fs: IFileSystem,
   vfs?: FabricVFS,
   mountStorage?: (path: string, storageId: string) => Promise<void>,
-  worldOnTick?: (cb: () => void) => void,
-  uidRef?: { value: number }
+  uidRef?: { value: number },
+  extraHandlers?: Record<string, ExtraHandler>
 ) {
   const cout: Cout = async (line: string) => {
     console.log(line);
   };
 
-  const shell = createShell(fs, vfs, mountStorage, worldOnTick, uidRef);
+  const shell = createShell(fs, vfs, mountStorage, uidRef, extraHandlers);
 
   async function $(
     strings: TemplateStringsArray,

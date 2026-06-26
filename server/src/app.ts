@@ -3,6 +3,7 @@ import { RootFS } from '@src/fs/root-fs';
 import { FabricVFS } from '@src/fs/fabric-vfs';
 import { DevFS } from '@src/fs/dev-fs';
 import { VirtualFS } from '@src/fs/virtual-fs';
+import { UserDaemon } from '@src/userd/daemon';
 import { createCLI } from '@src/shell/cli';
 import { rateLimit } from '@src/fs/rate-limiter';
 import { createTtyBridge } from '@src/shell/tty-bridge';
@@ -89,15 +90,12 @@ async function mountExternalStorage(
   vfs.mount(path, new RootFS(realFs));
 }
 
-const { shell } = createCLI(
-  vfs,
-  vfs,
-  mountExternalStorage,
-  world.onTick.bind(world),
-  uidRef
-);
+const { shell } = createCLI(vfs, vfs, mountExternalStorage, uidRef);
 
 // 初始化 TTY bridge（服务端 → RemoteChannel → 客户端 TTY UI）
 createTtyBridge(shell);
 
-vfs.init().then(() => console.warn('✓ FabricVFS ready'));
+vfs.init().then(() => {
+  new UserDaemon(vfs).mount();
+  console.warn('✓ FabricVFS ready');
+});

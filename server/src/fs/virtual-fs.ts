@@ -225,4 +225,8 @@ export class VirtualFS implements IFileSystem {
   async chmod(path: string, _mode: number): Promise<void> {
     throw new Error(`EROFS: cannot chmod '${path}': read-only`);
   }
+
+  async chown(_path: string, _owner: number): Promise<void> {
+    throw new Error('EROFS: cannot chown');
+  }
 }

@@ -111,6 +111,16 @@ export class RootFS implements IFileSystem {
     await this.fs.setINode(id, inode);
   }
 
+  async chown(path: string, owner: number): Promise<void> {
+    const id = await this.resolve(path);
+    if (id === null) throw new Error(`ENOENT: ${path} not found`);
+    if (!(await this.checkAccess(id, 0o2))) throw new Error(`EACCES: ${path}`);
+    const inode = await this.fs.getINode(id);
+    inode.uid = owner;
+    inode.ctime = Date.now();
+    await this.fs.setINode(id, inode);
+  }
+
   async readFile(path: string): Promise<string | null> {
     const id = await this.resolve(path);
     if (id === null) return null;
@@ -160,7 +170,7 @@ export class RootFS implements IFileSystem {
           type: 'file',
           parent: parentId,
           mode: 0o644,
-          uid: 0,
+          uid: this.uidRef?.value ?? 0,
           gid: 0,
           size: data.length,
           atime: now,
@@ -174,7 +184,7 @@ export class RootFS implements IFileSystem {
           type: 'file',
           parent: parentId,
           mode: 0o644,
-          uid: 0,
+          uid: this.uidRef?.value ?? 0,
           gid: 0,
           size: data.length,
           atime: now,
@@ -207,7 +217,7 @@ export class RootFS implements IFileSystem {
       type: 'dir',
       parent: parentId,
       mode: 0o755,
-      uid: 0,
+      uid: this.uidRef?.value ?? 0,
       gid: 0,
       size: 0,
       atime: now,

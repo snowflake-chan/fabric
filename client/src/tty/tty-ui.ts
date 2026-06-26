@@ -88,8 +88,11 @@ export class TtyUI {
     this.setupClose();
     this.setupRemoteChannel();
     this.setupInput();
-    this.appendLine('FabricFS TTY v0.1 — 输入 "help" 查看命令', COLOR_INFO);
-    setTimeout(() => this.inputField.focus(), 200);
+    this.appendLine('FabricFS TTY v0.1', COLOR_INFO);
+    setTimeout(() => {
+      this.inputField.focus();
+      remoteChannel.sendServerEvent({ type: 'tty-cmd', cmd: 'login' });
+    }, 200);
   }
 
   // ---- UI ----------------------------------------------------------------

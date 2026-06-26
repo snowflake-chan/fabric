@@ -84,6 +84,7 @@ export interface IFileSystem {
   exists(path: string): Promise<boolean>;
   stat(path: string): Promise<FileStat | null>;
   chmod(path: string, mode: number): Promise<void>;
+  chown(path: string, owner: number): Promise<void>;
   readFile(path: string): Promise<string | null>;
   writeFile(path: string, data: string): Promise<void>;
   mkdir(path: string): Promise<void>;
