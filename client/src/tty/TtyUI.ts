@@ -174,19 +174,6 @@ export class TtyUI {
   // ---- 输入处理 --------------------------------------------------------------
 
   private setupInput(): void {
-    // 方式1：轮询检测输入文本中的换行符（部分平台 Enter → \n）
-    setInterval(() => {
-      if (this.inputBusy) return;
-      const text = this.inputField.textContent;
-      if (text.includes('\n')) {
-        const parts = text.split('\n');
-        const cmd = parts[0].trim();
-        this.inputField.textContent = parts.slice(1).join('\n');
-        if (cmd) this.executeCommand(cmd);
-      }
-    }, 150);
-
-    // 方式2：失焦时捕获（部分平台 Enter → blur）
     this.inputField.events.on('blur', () => {
       if (this.inputBusy) return;
       const text = this.inputField.textContent.trim();
@@ -199,6 +186,21 @@ export class TtyUI {
 
   private executeCommand(cmd: string): void {
     this.inputBusy = true;
+
+    // 清屏 — 直接清除本地行，不发送到服务端
+    if (cmd.trim() === 'clear') {
+      for (const line of this.lines) {
+        line.parent = undefined;
+      }
+      this.lines = [];
+      this.scrollContent.size.offset.y = 0;
+      setTimeout(() => {
+        this.inputField.focus();
+        this.inputBusy = false;
+      }, 100);
+      return;
+    }
+
     this.appendLine(`$ ${cmd}`, COLOR_PROMPT);
     remoteChannel.sendServerEvent({ type: 'tty-cmd', cmd });
     setTimeout(() => {

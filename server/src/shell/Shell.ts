@@ -94,6 +94,49 @@ function splitSemicolon(s: string): string[] {
   return parts;
 }
 
+/**
+ * 解析 && / || 逻辑链。
+ * "echo a && echo b || echo c"
+ *   → [{cmd:"echo a",require:null},{cmd:"echo b",require:"success"},{cmd:"echo c",require:"failure"}]
+ */
+function parseLogical(
+  s: string
+): Array<{ cmd: string; require: 'success' | 'failure' | null }> {
+  const result: Array<{
+    cmd: string;
+    require: 'success' | 'failure' | null;
+  }> = [];
+  let current = '';
+  let inQuote: string | null = null;
+  let nextRequire: 'success' | 'failure' | null = null;
+
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQuote) {
+      if (c === inQuote) inQuote = null;
+      current += c;
+    } else if (c === '"' || c === "'") {
+      inQuote = c;
+      current += c;
+    } else if (c === '&' && s[i + 1] === '&') {
+      result.push({ cmd: current.trim(), require: nextRequire });
+      current = '';
+      nextRequire = 'success';
+      i++;
+    } else if (c === '|' && s[i + 1] === '|') {
+      result.push({ cmd: current.trim(), require: nextRequire });
+      current = '';
+      nextRequire = 'failure';
+      i++;
+    } else {
+      current += c;
+    }
+  }
+  const last = current.trim();
+  if (last) result.push({ cmd: last, require: nextRequire });
+  return result;
+}
+
 // ---- 流式 tree（逐行 emit）---------------------------------------------------
 
 async function streamTree(
@@ -136,6 +179,8 @@ type ShellHandler = (cout: Cout, ...args: string[]) => Promise<void>;
 
 export function createShell(fs: FabricFS) {
   let cwd = '/';
+  const history: string[] = [];
+  const MAX_HISTORY = 100;
 
   const handlers: Record<string, ShellHandler> = {
     async ls(cout, path) {
@@ -290,10 +335,20 @@ export function createShell(fs: FabricFS) {
       await cout('init ok');
     },
 
+    async clear() {
+      // 清屏由客户端处理（TtyUI 检测到 clear 命令后清除本地行）
+    },
+
     async help(cout) {
       const names = Object.keys(handlers).sort();
       for (const name of names) {
         await cout(name);
+      }
+    },
+
+    async history(cout) {
+      for (let i = 0; i < history.length; i++) {
+        await cout(`${i + 1}  ${history[i]}`);
       }
     },
   };
@@ -308,6 +363,23 @@ export function createShell(fs: FabricFS) {
     const trimmed = input.trim();
     if (!trimmed) return { ok: true };
 
+    // !! 展开上一条命令
+    const expanded =
+      trimmed === '!!' ? (history[history.length - 1] ?? '') : trimmed;
+    if (trimmed === '!!') {
+      if (!expanded) {
+        await cout('history: no previous command');
+        return { ok: false, error: 'no previous command' };
+      }
+      await cout(expanded);
+    }
+
+    // 记录历史（仅顶层命令）
+    if (depth === 0 && expanded) {
+      history.push(expanded);
+      if (history.length > MAX_HISTORY) history.shift();
+    }
+
     // 分号分隔的多命令序列
     const cmds = splitSemicolon(trimmed);
     if (cmds.length > 1) {
@@ -315,8 +387,20 @@ export function createShell(fs: FabricFS) {
       for (const cmd of cmds) {
         const t = cmd.trim();
         if (!t) continue;
-        result = await exec(t, cout, depth);
+        result = await exec(t, cout, depth + 1);
         if (!result.ok) return result;
+      }
+      return result;
+    }
+
+    // && / || 逻辑链
+    const steps = parseLogical(trimmed);
+    if (steps.length > 1) {
+      let result: ShellResult = { ok: true };
+      for (const step of steps) {
+        if (step.require === 'success' && !result.ok) continue;
+        if (step.require === 'failure' && result.ok) continue;
+        result = await exec(step.cmd, cout, depth + 1);
       }
       return result;
     }
@@ -485,5 +569,5 @@ export function createShell(fs: FabricFS) {
     return { ok: true };
   }
 
-  return { exec };
+  return { exec, history: history as readonly string[] };
 }
