@@ -22,6 +22,9 @@ export type ShellResult = { ok: true } | { ok: false; error: string };
 /** 最大嵌套脚本深度，防止无限递归 */
 const MAX_SCRIPT_DEPTH = 10;
 
+/** 循环最大迭代次数，防止死循环 */
+const MAX_LOOP_ITERATIONS = 10000;
+
 // ---- 路径工具 --------------------------------------------------------------
 
 /** 将任意路径（相对/绝对）解析为绝对路径 */
@@ -181,6 +184,8 @@ export function createShell(fs: FabricFS) {
   let cwd = '/';
   const history: string[] = [];
   const MAX_HISTORY = 100;
+  /** 循环变量作用域 */
+  const vars = new Map<string, string>();
 
   const handlers: Record<string, ShellHandler> = {
     async ls(cout, path) {
@@ -233,16 +238,6 @@ export function createShell(fs: FabricFS) {
     },
 
     async echo(cout, ...args) {
-      const redirIdx = args.indexOf('>');
-      if (redirIdx !== -1) {
-        const text = processEscapes(args.slice(0, redirIdx).join(' '));
-        const rawPath = args[redirIdx + 1];
-        if (!rawPath) throw new Error('Usage: echo <text> > <path>');
-        const target = resolvePath(cwd, rawPath);
-        await fs.writeFile(target, `${text}\n`);
-        await cout(`→ written ${target}`);
-        return;
-      }
       await cout(processEscapes(args.join(' ')));
     },
 
@@ -351,6 +346,14 @@ export function createShell(fs: FabricFS) {
         await cout(`${i + 1}  ${history[i]}`);
       }
     },
+
+    ['true']: async () => {
+      // always succeeds — no-op
+    },
+
+    ['false']: async () => {
+      throw new Error('false');
+    },
   };
 
   // ── exec：公开入口，解析并执行一条命令 ─────────────────────────────────
@@ -368,7 +371,6 @@ export function createShell(fs: FabricFS) {
       trimmed === '!!' ? (history[history.length - 1] ?? '') : trimmed;
     if (trimmed === '!!') {
       if (!expanded) {
-        await cout('history: no previous command');
         return { ok: false, error: 'no previous command' };
       }
       await cout(expanded);
@@ -378,6 +380,65 @@ export function createShell(fs: FabricFS) {
     if (depth === 0 && expanded) {
       history.push(expanded);
       if (history.length > MAX_HISTORY) history.shift();
+    }
+
+    // 控制流语句 — 直接 inline 解析，不走分号切割
+    if (expanded && /^(if|for|while)\s/.test(expanded)) {
+      // if condition; then body; (else body2;) fi
+      const ifMatch = expanded.match(/^if\s+(.+?);\s*then\s+(.+);\s*fi$/);
+      if (ifMatch) {
+        const condition = ifMatch[1];
+        const rest = ifMatch[2];
+        const elseMatch = rest.match(/^(.*?);\s*else\s+(.+)$/);
+        const thenBody = elseMatch ? elseMatch[1] : rest;
+        const elseBody = elseMatch ? elseMatch[2] : null;
+        const condResult = await exec(condition, cout, depth);
+        if (condResult.ok) {
+          if (thenBody) return await exec(thenBody, cout, depth);
+        } else if (elseBody) {
+          return await exec(elseBody, cout, depth);
+        }
+        return { ok: true };
+      }
+
+      // for var in words; do body; done
+      const forMatch = expanded.match(
+        /^for\s+(\w+)\s+in\s+(.+?);\s*do\s+(.+);\s*done$/
+      );
+      if (forMatch) {
+        const [, varname, wordList, body] = forMatch;
+        const words = tokenize(wordList);
+        const oldVal = vars.get(varname);
+        for (
+          let iter = 0;
+          iter < MAX_LOOP_ITERATIONS && iter < words.length;
+          iter++
+        ) {
+          vars.set(varname, words[iter]);
+          const r = await exec(body, cout, depth);
+          if (!r.ok) return r;
+        }
+        if (oldVal !== undefined) vars.set(varname, oldVal);
+        else vars.delete(varname);
+        return { ok: true };
+      }
+
+      // while condition; do body; done
+      const whileMatch = expanded.match(/^while\s+(.+?);\s*do\s+(.+);\s*done$/);
+      if (whileMatch) {
+        const [, condition, body] = whileMatch;
+        for (let iter = 0; iter < MAX_LOOP_ITERATIONS; iter++) {
+          const condResult = await exec(condition, cout, depth);
+          if (!condResult.ok) break;
+          const r = await exec(body, cout, depth);
+          if (!r.ok) return r;
+        }
+        return { ok: true };
+      }
+
+      // 以关键字开头但不是合法 inline 格式 → 走多行脚本
+      // eslint-disable-next-line no-use-before-define
+      return execScriptLines([expanded], 0, 1, cout, depth);
     }
 
     // 分号分隔的多命令序列
@@ -405,22 +466,74 @@ export function createShell(fs: FabricFS) {
       return result;
     }
 
-    const tokens = tokenize(trimmed);
+    // 变量展开（for 循环等设置）
+    let expandedLine = trimmed;
+    if (vars.size > 0) {
+      for (const [k, v] of vars) {
+        expandedLine = expandedLine.replaceAll(`$${k}`, v);
+      }
+    }
+
+    const tokens = tokenize(expandedLine);
     const cmdName = tokens[0]?.toLowerCase();
     const cmdArgs = tokens.slice(1);
+
+    // ---- > / >> 重定向（所有命令通用）----
+    const redirIdx = cmdArgs.indexOf('>>');
+    const redirSglIdx = redirIdx !== -1 ? -1 : cmdArgs.indexOf('>');
+    const hasRedirect = redirIdx !== -1 || redirSglIdx !== -1;
+    let runCout = cout;
+    let redirectTarget: string | null = null;
+    const redirectAppend = redirIdx !== -1;
+    let runArgs = cmdArgs;
+    const captured: string[] = [];
+
+    async function writeRedirect(): Promise<void> {
+      if (!redirectTarget) return;
+      const content = captured.join('\n') + (captured.length > 0 ? '\n' : '');
+      if (redirectAppend) {
+        const existing = await fs.readFile(redirectTarget);
+        await fs.writeFile(redirectTarget, (existing ?? '') + content);
+      } else {
+        await fs.writeFile(redirectTarget, content);
+      }
+      await cout(`→ written ${redirectTarget}`);
+    }
+
+    if (hasRedirect) {
+      const idx = redirectAppend ? redirIdx : redirSglIdx;
+      const rawPath = cmdArgs[idx + 1];
+      if (!rawPath || rawPath.startsWith('-')) {
+        return { ok: false, error: 'syntax error: redirect without target' };
+      }
+      redirectTarget = resolvePath(cwd, rawPath);
+      runArgs = cmdArgs.slice(0, idx).concat(cmdArgs.slice(idx + 2));
+      runCout = async (line: string) => {
+        captured.push(line);
+      };
+    }
+
     const handler = handlers[cmdName];
 
     if (!handler) {
       // eslint-disable-next-line no-use-before-define
-      const scriptResult = await tryExecScript(cmdName, cmdArgs, cout, depth);
-      if (scriptResult !== null) return scriptResult;
+      const scriptResult = await tryExecScript(
+        cmdName,
+        runArgs,
+        runCout,
+        depth
+      );
+      if (scriptResult !== null) {
+        await writeRedirect();
+        return scriptResult;
+      }
 
-      await cout(`unknown command: ${cmdName}`);
       return { ok: false, error: `unknown command: ${cmdName}` };
     }
 
     try {
-      await handler(cout, ...cmdArgs);
+      await handler(runCout, ...runArgs);
+      await writeRedirect();
       return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -431,18 +544,23 @@ export function createShell(fs: FabricFS) {
   // ── 脚本块执行（支持 if / else / end）------------------------------------
 
   /**
-   * 在 lines 中找到与 if 行匹配的 else 和 fi（支持嵌套）。
+   * 在 lines 中找到与 if/for/while 行匹配的 fi/done（支持嵌套）。
    */
   function findBlockEnd(
     lines: string[],
-    ifIdx: number
+    openIdx: number
   ): { endIdx: number; elseIdx: number | null } {
     let elseIdx: number | null = null;
     let depth = 0;
-    for (let i = ifIdx + 1; i < lines.length; i++) {
+    for (let i = openIdx + 1; i < lines.length; i++) {
       const line = lines[i].trim();
-      if (line.startsWith('if ')) depth++;
-      else if (line === 'fi') {
+      if (
+        line.startsWith('if ') ||
+        line.startsWith('for ') ||
+        line.startsWith('while ')
+      ) {
+        depth++;
+      } else if (line === 'fi' || line === 'done') {
         if (depth === 0) return { endIdx: i, elseIdx };
         depth--;
       } else if (line === 'else' && depth === 0 && elseIdx === null) {
@@ -467,10 +585,19 @@ export function createShell(fs: FabricFS) {
       const line = lines[i].trim();
       i++;
       if (line === '' || line.startsWith('#')) continue;
-      if (line === 'else' || line === 'fi') continue;
+      if (line === 'else' || line === 'fi' || line === 'done') continue;
+      if (line === 'then' || line === 'do') continue;
 
       if (line.startsWith('if ')) {
-        // 提取条件：支持 "if condition; then" 和下一行 "then" 两种写法
+        // 全部在一行 → 交给 exec 处理（它有自己的 inline 解析）
+        if (/;\s*fi(?:\s|$)/.test(line)) {
+          const r = await exec(line, cout, depth + 1);
+          if (!r.ok) return r;
+          i++;
+          continue;
+        }
+
+        // if condition; then / if condition \n then
         let condition = line.slice(3).trim();
         if (condition.endsWith('; then')) {
           condition = condition.slice(0, -6).trim();
@@ -481,8 +608,7 @@ export function createShell(fs: FabricFS) {
           if (nextLine === 'then') i++;
         }
         if (!condition) {
-          await cout('syntax error: if without condition');
-          return { ok: false, error: 'if without condition' };
+          return { ok: false, error: 'syntax error: if without condition' };
         }
 
         const block = findBlockEnd(lines, i - 1);
@@ -511,9 +637,91 @@ export function createShell(fs: FabricFS) {
         continue;
       }
 
+      if (line.startsWith('for ')) {
+        // 全部在一行 → 交给 exec 处理
+        if (/;\s*done(?:\s|$)/.test(line)) {
+          const r = await exec(line, cout, depth + 1);
+          if (!r.ok) return r;
+          i++;
+          continue;
+        }
+
+        // for varname in word1 word2; do / for varname in word1 word2 \n do
+        const rest = line.slice(4).trim();
+        const parts = rest.split(/\s+/);
+        const varname = parts[0];
+        const inIdx = parts.indexOf('in');
+        if (inIdx === -1) {
+          return { ok: false, error: 'syntax error: for without in' };
+        }
+        const doIdx = parts.indexOf('do');
+        let words: string[];
+        if (doIdx !== -1) {
+          words = parts.slice(inIdx + 1, doIdx);
+        } else {
+          words = parts.slice(inIdx + 1);
+          if (i < endIdx) {
+            const nextLine = lines[i].trim();
+            if (nextLine === 'do') i++;
+          }
+        }
+
+        const block = findBlockEnd(lines, i - 1);
+        const oldVal = vars.get(varname);
+
+        for (
+          let iter = 0;
+          iter < MAX_LOOP_ITERATIONS && iter < words.length;
+          iter++
+        ) {
+          vars.set(varname, words[iter]);
+          const r = await execScriptLines(lines, i, block.endIdx, cout, depth);
+          if (!r.ok) return r;
+        }
+
+        if (oldVal !== undefined) vars.set(varname, oldVal);
+        else vars.delete(varname);
+        i = block.endIdx + 1;
+        continue;
+      }
+
+      if (line.startsWith('while ')) {
+        // 全部在一行 → 交给 exec 处理
+        if (/;\s*done(?:\s|$)/.test(line)) {
+          const r = await exec(line, cout, depth + 1);
+          if (!r.ok) return r;
+          i++;
+          continue;
+        }
+
+        // while condition; do / while condition \n do
+        let condition = line.slice(6).trim();
+        if (condition.endsWith('; do')) {
+          condition = condition.slice(0, -4).trim();
+        } else if (condition.endsWith(';do')) {
+          condition = condition.slice(0, -3).trim();
+        } else if (i < endIdx) {
+          const nextLine = lines[i].trim();
+          if (nextLine === 'do') i++;
+        }
+        if (!condition) {
+          return { ok: false, error: 'syntax error: while without condition' };
+        }
+
+        const block = findBlockEnd(lines, i - 1);
+
+        for (let iter = 0; iter < MAX_LOOP_ITERATIONS; iter++) {
+          const condResult = await exec(condition, cout, depth + 1);
+          if (!condResult.ok) break;
+          const r = await execScriptLines(lines, i, block.endIdx, cout, depth);
+          if (!r.ok) return r;
+        }
+        i = block.endIdx + 1;
+        continue;
+      }
+
       const r = await exec(line, cout, depth + 1);
       if (!r.ok) {
-        await cout(`script error at line ${i}: ${r.error}`);
         return { ok: false, error: r.error, failedLine: i };
       }
     }
@@ -535,26 +743,23 @@ export function createShell(fs: FabricFS) {
     const resolved = resolvePath(cwd, cmdName);
     const st = await fs.stat(resolved);
     if (st === null) {
-      await cout(`ENOENT: ${resolved}: file not found`);
       return { ok: false, error: `ENOENT: ${resolved}` };
     }
     if (st.type !== 'file') {
-      await cout(`EISDIR: ${resolved}: is a directory`);
       return { ok: false, error: `EISDIR: ${resolved}` };
     }
     if ((st.mode & 0o111) === 0) {
-      await cout(`EACCES: ${resolved}: file is not executable`);
       return { ok: false, error: `EACCES: ${resolved}` };
     }
     if (depth >= MAX_SCRIPT_DEPTH) {
-      const msg = `error: max recursion depth (${MAX_SCRIPT_DEPTH}) exceeded`;
-      await cout(msg);
-      return { ok: false, error: msg };
+      return {
+        ok: false,
+        error: `max recursion depth (${MAX_SCRIPT_DEPTH}) exceeded`,
+      };
     }
 
     const content = await fs.readFile(resolved);
     if (content === null) {
-      await cout(`ENOENT: ${resolved}: file not found`);
       return { ok: false, error: `ENOENT: ${resolved}` };
     }
 
