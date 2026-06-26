@@ -43,9 +43,6 @@ const baseRules = {
   // 禁止使用不必要的三元表达式
   'no-unneeded-ternary': 1,
 
-  // 禁止在变量定义之前使用变量
-  'no-use-before-define': 2,
-
   // 禁止在同一作用域内重新声明变量
   'no-redeclare': 2,
 
