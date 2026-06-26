@@ -12,15 +12,21 @@
 
 import { createShell, type Cout } from './Shell';
 import { type IFileSystem } from '../fs/FileSystem';
+import { type FabricVFS } from '../fs/FabricVFS';
 
 // ---- CLI 工厂 ---------------------------------------------------------------
 
-export function createCLI(fs: IFileSystem) {
+export function createCLI(
+  fs: IFileSystem,
+  vfs?: FabricVFS,
+  mountStorage?: (path: string, storageId: string) => Promise<void>,
+  worldOnTick?: (cb: () => void) => void
+) {
   const cout: Cout = async (line: string) => {
     console.log(line);
   };
 
-  const shell = createShell(fs);
+  const shell = createShell(fs, vfs, mountStorage, worldOnTick);
 
   async function $(
     strings: TemplateStringsArray,

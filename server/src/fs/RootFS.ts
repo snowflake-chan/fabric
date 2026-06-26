@@ -21,6 +21,11 @@ export class RootFS implements IFileSystem {
     await this.fs.init();
   }
 
+  /** 格式化（重置）文件系统 */
+  async format(): Promise<void> {
+    await this.fs.format();
+  }
+
   // ---- 路径解析 ------------------------------------------------------------
 
   private async resolve(path: string): Promise<number | null> {

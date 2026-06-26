@@ -6,6 +6,7 @@
  */
 
 import { type IFileSystem } from '../fs/FileSystem';
+import { type FabricVFS } from '../fs/FabricVFS';
 import { Path } from '../fs/Path';
 
 // ---- 类型 ------------------------------------------------------------------
@@ -20,17 +21,32 @@ export type ShellHandler = (cout: Cout, ...args: string[]) => Promise<void>;
  */
 export interface CmdEnv {
   fs: IFileSystem;
+  vfs?: FabricVFS;
   cwdRef: { value: string };
   vars: Map<string, string>;
   pipeInputRef: { value: string | null };
   history: string[];
   getHandler: (name: string) => ShellHandler | undefined;
+  /** 根据 storageId 创建 RootFS 并挂载到指定路径 */
+  mountStorage?: (path: string, storageId: string) => Promise<void>;
+  /** 游戏引擎 tick（每帧执行） */
+  worldOnTick?: (cb: () => void) => void;
 }
 
 // ---- 工厂 ------------------------------------------------------------------
 
 export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
-  const { fs, cwdRef, pipeInputRef, history, getHandler } = env;
+  const {
+    fs,
+    vfs,
+    cwdRef,
+    vars,
+    pipeInputRef,
+    history,
+    getHandler,
+    mountStorage,
+    worldOnTick,
+  } = env;
   const cwd = () => cwdRef.value;
   const pipeInput = () => pipeInputRef.value;
 
@@ -87,20 +103,17 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
         throw new Error(`chmod: invalid mode '${args[0]}'`);
       }
       await fs.chmod(target, mode);
-      await cout(`chmod ${mode.toString(8).padStart(3, '0')} ${target}`);
     },
 
     async echo(cout, ...args) {
       await cout(processEscapes(args.join(' ')));
     },
 
-    async mkdir(cout, path) {
-      const target = resolve(path);
-      await fs.mkdir(target);
-      await cout(target);
+    async mkdir(_cout, path) {
+      await fs.mkdir(resolve(path));
     },
 
-    async rm(cout, ...args) {
+    async rm(_cout, ...args) {
       let recursive = false,
         force = false;
       const paths: string[] = [];
@@ -118,45 +131,32 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
         try {
           if (recursive || force) await fs.rimraf(target);
           else await fs.unlink(target);
-          await cout(target);
         } catch (err) {
           if (!force) throw err;
         }
       }
     },
 
-    async rmdir(cout, path) {
-      const target = resolve(path);
-      await fs.rmdir(target);
-      await cout(target);
+    async rmdir(_cout, path) {
+      await fs.rmdir(resolve(path));
     },
 
-    async mv(cout, oldPath, newPath) {
-      const oldT = resolve(oldPath);
-      const newT = resolve(newPath);
-      await fs.rename(oldT, newT);
-      await cout(`${oldT} → ${newT}`);
+    async mv(_cout, oldPath, newPath) {
+      await fs.rename(resolve(oldPath), resolve(newPath));
     },
 
-    async cp(cout, src, dst) {
+    async cp(_cout, src, dst) {
       if (!src || !dst) throw new Error('Usage: cp <src> <dst>');
-      const srcT = resolve(src);
-      const dstT = resolve(dst);
-      const content = await fs.readFile(srcT);
-      if (content === null) throw new Error(`ENOENT: ${srcT}`);
-      await fs.writeFile(dstT, content);
-      await cout(`${srcT} → ${dstT}`);
+      const content = await fs.readFile(resolve(src));
+      if (content === null) throw new Error(`ENOENT: ${resolve(src)}`);
+      await fs.writeFile(resolve(dst), content);
     },
 
-    async touch(cout, path) {
+    async touch(_cout, path) {
       const target = resolve(path);
       const st = await fs.stat(target);
       if (st === null) {
         await fs.writeFile(target, '');
-        await cout(target);
-      } else {
-        // 更新时间戳（目前只是 no-op，stat 有 atime/mtime/ctime）
-        await cout(target);
       }
     },
 
@@ -223,13 +223,32 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
       if (subcmd === 'cat') {
         if (!path) throw new Error('Usage: sock cat <path>');
         const target = resolve(path);
-        while (true) {
-          const line = await fs.readFile(target);
-          if (line !== null && line !== undefined && line.length > 0)
-            await cout(line);
-        }
+        const line = await fs.readFile(target);
+        if (line !== null && line.length > 0) await cout(line);
+        return;
       }
-      throw new Error(`sock: unknown subcommand '${subcmd}' (try: cat)`);
+      if (subcmd === 'listen') {
+        if (!path) throw new Error('Usage: sock listen <path>');
+        const target = resolve(path);
+        if (!worldOnTick) throw new Error('sock: world.onTick not available');
+        worldOnTick(async () => {
+          const line = await fs.readFile(target);
+          if (line !== null && line.length > 0) await cout(line);
+        });
+        await cout(`listening on ${target}`);
+        return;
+      }
+      if (subcmd === 'create') {
+        if (!path) throw new Error('Usage: sock create <path>');
+        const target = resolve(path);
+        if (!vfs) throw new Error('sock: VFS not available');
+        vfs.registerSocket(target);
+        await cout(`socket created at ${target}`);
+        return;
+      }
+      throw new Error(
+        `sock: unknown subcommand '${subcmd}' (try: cat, create)`
+      );
     },
 
     // ---- 帮助 --------------------------------------------------------------
@@ -243,6 +262,92 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
       for (let i = 0; i < history.length; i++) {
         await cout(`${i + 1}  ${history[i]}`);
       }
+    },
+
+    async fabric(cout, flag) {
+      if (flag === '-v' || flag === '--version') {
+        await cout('FabricFS v0.2 — ArenaPro virtual filesystem');
+        return;
+      }
+      throw new Error('Usage: fabric -v');
+    },
+
+    // ---- 变量 --------------------------------------------------------------
+
+    ['export']: async (cout, ...args) => {
+      if (args.length === 0) {
+        // export — 列出所有已导出的变量
+        for (const [k, v] of vars) {
+          await cout(`export ${k}=${v}`);
+        }
+        return;
+      }
+      for (const a of args) {
+        const eq = a.indexOf('=');
+        if (eq !== -1) {
+          const name = a.slice(0, eq);
+          const val = a.slice(eq + 1);
+          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+            vars.set(name, val);
+          }
+        } else if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(a)) {
+          // export name — 确保存在（已有值不变）
+          if (!vars.has(a)) vars.set(a, '');
+        }
+      }
+    },
+
+    async unset(_cout, name) {
+      if (!name) throw new Error('Usage: unset <name>');
+      vars.delete(name);
+    },
+
+    async env(cout) {
+      const names = Array.from(vars.keys()).sort();
+      for (const k of names) {
+        await cout(`${k}=${vars.get(k)}`);
+      }
+    },
+
+    // ---- 系统管理 ----------------------------------------------------------
+
+    async mount(cout, path, storageId) {
+      if (!vfs) throw new Error('mount: not available (no VFS)');
+      if (path && storageId) {
+        // mount <path> <storageId> — 挂载外部存储
+        if (!mountStorage) throw new Error('mount: storage not available');
+        const target = Path.resolve(cwd(), path);
+        await mountStorage(target, storageId);
+        await cout(`mounted ${storageId} at ${target}`);
+        return;
+      }
+      // mount — 列出挂载点
+      const list = vfs.getMounts();
+      for (const m of list) {
+        await cout(`${m.prefix}  ${m.type}`);
+      }
+    },
+
+    async unmount(cout, prefix) {
+      if (!vfs) throw new Error('unmount: not available (no VFS)');
+      if (!prefix) throw new Error('Usage: unmount <path>');
+      vfs.unmount(prefix);
+      await cout(`unmounted ${prefix}`);
+    },
+
+    async format(cout, path) {
+      if (path && vfs) {
+        const target = Path.resolve(cwd(), path);
+        const targetFs = vfs.getFs(target);
+        if (!targetFs) throw new Error(`format: no filesystem at ${target}`);
+        await targetFs.format();
+        if (target === cwd()) cwdRef.value = '/';
+        await cout(`format ok: ${target}`);
+        return;
+      }
+      await fs.format();
+      cwdRef.value = '/';
+      await cout('format ok');
     },
 
     // ---- 控制流条件 ----------------------------------------------------------

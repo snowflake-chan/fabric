@@ -80,6 +80,7 @@ const K_CHUNK = (id: number, n: number) => `C:${id}:${n}`;
 
 export interface IFileSystem {
   init(): Promise<void>;
+  format(): Promise<void>;
   exists(path: string): Promise<boolean>;
   stat(path: string): Promise<FileStat | null>;
   chmod(path: string, mode: number): Promise<void>;
@@ -145,6 +146,40 @@ export class FabricFS {
     this.dirCache.set(ROOT_INODE, []);
 
     this.metaCache = meta;
+  }
+
+  /**
+   * 格式化（重置）文件系统。
+   * 重建根目录，清除缓存。旧数据块在 KV 中成为孤儿，下次 allocInode 会覆盖。
+   */
+  async format(): Promise<void> {
+    const meta: FSMeta = { rootInode: ROOT_INODE, nextInode: ROOT_INODE + 1 };
+    await this.storage.set(K_META, meta as unknown as JSONValue);
+
+    const now = Date.now();
+    const rootInode: INode = {
+      type: 'dir',
+      parent: 0,
+      mode: 0o755,
+      uid: 0,
+      gid: 0,
+      size: 0,
+      atime: now,
+      mtime: now,
+      ctime: now,
+      nlinks: 2,
+    };
+    await this.storage.set(
+      K_INODE(ROOT_INODE),
+      rootInode as unknown as JSONValue
+    );
+    await this.storage.set(K_DIR(ROOT_INODE), [] as JSONValue);
+
+    this.inodeCache.clear();
+    this.dirCache.clear();
+    this.metaCache = meta;
+    this.inodeCache.set(ROOT_INODE, rootInode);
+    this.dirCache.set(ROOT_INODE, []);
   }
 
   // ------------------------------------------------------------------

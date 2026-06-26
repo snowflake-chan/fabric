@@ -19,9 +19,9 @@ const vfs = new FabricVFS();
 vfs.mount('/', new RootFS(new FabricFS(db)));
 
 // 挂载虚拟设备到 /dev
-const devFs = new DevFS();
+const devFs = new DevFS(vfs.bus);
 
-devFs.registerDevice('/dev/box/say', {
+devFs.registerDevice('/box/say', {
   stat: () => ({
     type: 'file',
     mode: 0o666,
@@ -39,7 +39,7 @@ devFs.registerDevice('/dev/box/say', {
   },
 });
 
-devFs.registerDevice('/dev/box/players', {
+devFs.registerDevice('/box/players', {
   stat: () => ({
     type: 'file',
     mode: 0o666,
@@ -62,14 +62,33 @@ devFs.registerDevice('/dev/box/players', {
   writeFile: () => {},
 });
 
-const playerJoinSock = devFs.registerSocket('/dev/box/player-join');
+const playerJoinSock = devFs.registerSocket('/box/player-join');
 vfs.mount('/dev', devFs);
 
 world.onPlayerJoin(({ entity }) => {
   playerJoinSock.push(`${entity.player.userId}\t${entity.player.name}`);
 });
 
-const { shell } = createCLI(vfs);
+// mount <path> <storageId> — 挂载任意 GameDataStorage
+async function mountExternalStorage(
+  path: string,
+  storageId: string
+): Promise<void> {
+  const db = rateLimit(storage.getDataStorage(storageId), {
+    readsPerSec: 20,
+    writesPerSec: 10,
+  });
+  const realFs = new FabricFS(db);
+  await realFs.init();
+  vfs.mount(path, new RootFS(realFs));
+}
+
+const { shell } = createCLI(
+  vfs,
+  vfs,
+  mountExternalStorage,
+  world.onTick.bind(world)
+);
 
 // 初始化 TTY bridge（服务端 → RemoteChannel → 客户端 TTY UI）
 createTtyBridge(shell);

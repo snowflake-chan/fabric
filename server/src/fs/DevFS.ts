@@ -11,6 +11,7 @@
  */
 
 import { type IFileSystem, type FileStat } from './FileSystem';
+import type { EventBus } from './EventBus';
 import { EventSocket } from './EventSocket';
 import { Path } from './Path';
 
@@ -29,9 +30,9 @@ export class DevFS implements IFileSystem {
   private devices = new Map<string, VirtualDevice>();
   private sockets = new Map<string, EventSocket>();
 
-  constructor() {
-    // 默认设备
-    this.devices.set('/dev', {
+  constructor(private bus: EventBus) {
+    // 根目录
+    this.devices.set('/', {
       stat: () => ({
         type: 'dir',
         mode: 0o555,
@@ -46,17 +47,18 @@ export class DevFS implements IFileSystem {
       readdir: () => {
         const kids: string[] = [];
         for (const k of this.devices.keys()) {
-          if (k.startsWith('/dev/') && k !== '/dev') {
-            const name = k.substring(5);
-            if (!name.includes('/')) kids.push(name);
+          if (k.startsWith('/') && k !== '/') {
+            // 取第一层子路径
+            const rest = k.slice(1);
+            const name = rest.split('/')[0];
+            if (name && !kids.includes(name)) kids.push(name);
           }
         }
         return kids.sort();
       },
     });
 
-    // 内置 /dev/null
-    this.devices.set('/dev/null', {
+    this.devices.set('/null', {
       stat: () => ({
         type: 'file',
         mode: 0o666,
@@ -74,7 +76,7 @@ export class DevFS implements IFileSystem {
       },
     });
 
-    this.devices.set('/dev/zero', {
+    this.devices.set('/zero', {
       stat: () => ({
         type: 'file',
         mode: 0o444,
@@ -89,7 +91,7 @@ export class DevFS implements IFileSystem {
       readFile: () => '\0'.repeat(4096),
     });
 
-    this.devices.set('/dev/random', {
+    this.devices.set('/random', {
       stat: () => ({
         type: 'file',
         mode: 0o444,
@@ -129,7 +131,7 @@ export class DevFS implements IFileSystem {
    * 返回 EventSocket，引擎侧通过 .push(line) 推数据。
    */
   registerSocket(path: string): EventSocket {
-    const sock = new EventSocket();
+    const sock = new EventSocket(this.bus, path);
     this.sockets.set(path, sock);
     this.devices.set(path, {
       stat: () => ({
@@ -143,7 +145,7 @@ export class DevFS implements IFileSystem {
         ctime: 0,
         nlinks: 1,
       }),
-      readFile: () => sock.readLine(),
+      readFile: () => sock.tryRead(),
       writeFile: (data) => sock.push(data),
     });
     this.ensureParentDir(path);
@@ -178,6 +180,7 @@ export class DevFS implements IFileSystem {
           return kids.sort();
         },
       });
+      this.ensureParentDir(parent);
     }
   }
 
@@ -202,6 +205,86 @@ export class DevFS implements IFileSystem {
 
   async init(): Promise<void> {
     // DevFS 无持久化，无需初始化
+  }
+
+  async format(): Promise<void> {
+    // 重置为出厂设备
+    this.devices.clear();
+    this.sockets.clear();
+    // 重新创建默认设备（同构造函数逻辑）
+    this.devices.set('/', {
+      stat: () => ({
+        type: 'dir',
+        mode: 0o555,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        nlinks: 2,
+      }),
+      readdir: () => {
+        const kids: string[] = [];
+        for (const k of this.devices.keys()) {
+          if (k.startsWith('/') && k !== '/') {
+            const rest = k.slice(1);
+            const name = rest.split('/')[0];
+            if (name && !kids.includes(name)) kids.push(name);
+          }
+        }
+        return kids.sort();
+      },
+    });
+    this.devices.set('/null', {
+      stat: () => ({
+        type: 'file',
+        mode: 0o666,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        nlinks: 1,
+      }),
+      readFile: () => '',
+      writeFile: () => {},
+    });
+    this.devices.set('/zero', {
+      stat: () => ({
+        type: 'file',
+        mode: 0o444,
+        size: 4096,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        nlinks: 1,
+      }),
+      readFile: () => '\0'.repeat(4096),
+    });
+    this.devices.set('/random', {
+      stat: () => ({
+        type: 'file',
+        mode: 0o444,
+        size: 4096,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        nlinks: 1,
+      }),
+      readFile: () => {
+        const chars = 'abcdef0123456789';
+        let r = '';
+        for (let i = 0; i < 4096; i++)
+          r += chars[Math.floor(Math.random() * 16)];
+        return r;
+      },
+    });
   }
 
   async exists(path: string): Promise<boolean> {

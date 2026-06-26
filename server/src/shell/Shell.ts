@@ -6,6 +6,8 @@
  */
 
 import { type IFileSystem } from '../fs/FileSystem';
+import { type FabricVFS } from '../fs/FabricVFS';
+import { Path } from '../fs/Path';
 import { type Cout, createHandlers, setAllHandlers } from './commands';
 
 export type { Cout };
@@ -158,7 +160,12 @@ async function expandSubstitutions(
 
 // ---- Shell ---------------------------------------------------------------
 
-export function createShell(fs: IFileSystem) {
+export function createShell(
+  fs: IFileSystem,
+  vfs?: FabricVFS,
+  mountStorage?: (path: string, storageId: string) => Promise<void>,
+  worldOnTick?: (cb: () => void) => void
+) {
   const cwdRef = { value: '/' };
   const history: string[] = [];
   const MAX_HISTORY = 100;
@@ -167,11 +174,14 @@ export function createShell(fs: IFileSystem) {
 
   const handlers = createHandlers({
     fs,
+    vfs,
     cwdRef,
     vars,
     pipeInputRef,
     history,
     getHandler: (n) => handlers[n],
+    mountStorage,
+    worldOnTick,
   });
   setAllHandlers(handlers);
 
@@ -309,8 +319,26 @@ export function createShell(fs: IFileSystem) {
     }
 
     const tokens = tokenize(expandedLine);
-    const cmdName = tokens[0]?.toLowerCase();
+    const rawName = tokens[0];
+    const cmdName = rawName?.toLowerCase();
     const cmdArgs = tokens.slice(1);
+
+    // 变量赋值：name=value
+    const assignMatch = rawName?.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$/);
+    if (assignMatch) {
+      const [, varName, varValue] = assignMatch;
+      if (cmdArgs.length === 0) {
+        vars.set(varName, varValue);
+        return { ok: true };
+      }
+      // VAR=val command — 临时设变量，跑完命令后恢复
+      const oldVal = vars.get(varName);
+      vars.set(varName, varValue);
+      const r = await exec(cmdArgs.join(' '), cout, depth);
+      if (oldVal !== undefined) vars.set(varName, oldVal);
+      else vars.delete(varName);
+      return r;
+    }
 
     // < 输入重定向
     const inRedirIdx = cmdArgs.indexOf('<');
@@ -555,7 +583,7 @@ export function createShell(fs: IFileSystem) {
     if (!cmdName.includes('/') && !cmdName.startsWith('.')) return null;
     const resolved = cmdName.startsWith('/')
       ? cmdName
-      : `${cwdRef.value}/${cmdName}`;
+      : Path.resolve(cwdRef.value, cmdName);
     const st = await fs.stat(resolved);
     if (st === null) return { ok: false, error: `ENOENT: ${resolved}` };
     if (st.type !== 'file') return { ok: false, error: `EISDIR: ${resolved}` };
