@@ -20,13 +20,14 @@ export function createCLI(
   fs: IFileSystem,
   vfs?: FabricVFS,
   mountStorage?: (path: string, storageId: string) => Promise<void>,
-  worldOnTick?: (cb: () => void) => void
+  worldOnTick?: (cb: () => void) => void,
+  uidRef?: { value: number }
 ) {
   const cout: Cout = async (line: string) => {
     console.log(line);
   };
 
-  const shell = createShell(fs, vfs, mountStorage, worldOnTick);
+  const shell = createShell(fs, vfs, mountStorage, worldOnTick, uidRef);
 
   async function $(
     strings: TemplateStringsArray,

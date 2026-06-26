@@ -164,9 +164,11 @@ export function createShell(
   fs: IFileSystem,
   vfs?: FabricVFS,
   mountStorage?: (path: string, storageId: string) => Promise<void>,
-  worldOnTick?: (cb: () => void) => void
+  worldOnTick?: (cb: () => void) => void,
+  uidRef?: { value: number }
 ) {
   const cwdRef = { value: '/' };
+  if (!uidRef) uidRef = { value: 0 };
   const history: string[] = [];
   const MAX_HISTORY = 100;
   const vars = new Map<string, string>();
@@ -176,6 +178,7 @@ export function createShell(
     fs,
     vfs,
     cwdRef,
+    uidRef,
     vars,
     pipeInputRef,
     history,
@@ -582,7 +585,7 @@ export function createShell(
 
   async function tryExecScript(
     cmdName: string,
-    _args: string[],
+    args: string[],
     cout: Cout,
     depth: number
   ): Promise<ShellResult | null> {
@@ -602,8 +605,32 @@ export function createShell(
       };
     const content = await fs.readFile(resolved);
     if (content === null) return { ok: false, error: `ENOENT: ${resolved}` };
+
+    // 设脚本参数 $1 $2 …
+    const oldArgs = vars.get('@');
+    const oldArgv: string[] = [];
+    for (let i = 1; i <= args.length; i++) {
+      const k = String(i);
+      const old = vars.get(k);
+      if (old !== undefined) oldArgv[i] = old;
+      vars.set(k, args[i - 1]);
+    }
+    vars.set('#', String(args.length));
+    vars.set('@', args.join(' '));
+
     const lines = content.split('\n');
     const result = await execScriptLines(lines, 0, lines.length, cout, depth);
+
+    // 恢复
+    for (let i = 1; i <= args.length; i++) {
+      const k = String(i);
+      if (oldArgv[i] !== undefined) vars.set(k, oldArgv[i]);
+      else vars.delete(k);
+    }
+    if (oldArgs !== undefined) vars.set('@', oldArgs);
+    else vars.delete('@');
+    vars.delete('#');
+
     if (!result.ok)
       return {
         ok: false,

@@ -24,6 +24,7 @@ export interface CmdEnv {
   fs: IFileSystem;
   vfs?: FabricVFS;
   cwdRef: { value: string };
+  uidRef: { value: number }; // 当前用户 uid（0=root）
   vars: Map<string, string>;
   pipeInputRef: { value: string | null };
   history: string[];
@@ -44,6 +45,7 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
     vfs,
     cwdRef,
     vars,
+    uidRef,
     pipeInputRef,
     history,
     getHandler,
@@ -276,6 +278,146 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
       throw new Error('Usage: fabric -v');
     },
 
+    // ---- 用户管理 ----------------------------------------------------------
+
+    async whoami(cout) {
+      const pwd = await fs.readFile('/etc/passwd');
+      for (const line of (pwd ?? '').split('\n')) {
+        const parts = line.split(':');
+        if (parts.length >= 3 && parseInt(parts[2]) === uidRef.value) {
+          await cout(parts[0]);
+          return;
+        }
+      }
+      await cout('unknown');
+    },
+
+    async id(cout) {
+      let name: string | null = null;
+      const pwd = await fs.readFile('/etc/passwd');
+      if (pwd !== null) {
+        for (const line of pwd.split('\n')) {
+          const parts = line.split(':');
+          if (parts.length >= 3 && parseInt(parts[2]) === uidRef.value) {
+            name = parts[0];
+            break;
+          }
+        }
+      }
+      await cout(`uid=${uidRef.value}${name ? `(${name})` : ''}`);
+    },
+
+    async su(cout, targetUser) {
+      if (!targetUser) throw new Error('Usage: su <username>');
+      const pwd = await fs.readFile('/etc/passwd');
+      if (pwd === null) throw new Error('su: no users configured');
+
+      let targetUid = -1,
+        home = '/';
+      for (const line of pwd.split('\n')) {
+        const parts = line.split(':');
+        if (parts.length >= 3 && parts[0] === targetUser) {
+          targetUid = parseInt(parts[2]);
+          home = parts[5] || '/';
+          break;
+        }
+      }
+      if (targetUid < 0) throw new Error(`su: unknown user ${targetUser}`);
+
+      // setuid 提权读 shadow（普通用户无权限直接读 /etc/shadow）
+      const savedUid = uidRef.value;
+      uidRef.value = 0; // 临时提权
+      const shadow = await fs.readFile('/etc/shadow');
+      uidRef.value = savedUid; // 恢复
+
+      if (shadow !== null) {
+        for (const sl of shadow.split('\n')) {
+          const sp = sl.split(':');
+          if (sp[0] === targetUser && sp[1]) {
+            const pw = (await inputLine!()) || '';
+            if (simpleHash(pw) !== sp[1])
+              throw new Error('su: incorrect password');
+            break;
+          }
+        }
+      }
+
+      uidRef.value = targetUid;
+      cwdRef.value = home;
+      await cout('');
+    },
+
+    async useradd(cout, username) {
+      if (!username) throw new Error('Usage: useradd <username>');
+      if (uidRef.value !== 0)
+        throw new Error('useradd: only root may add users');
+      const pwd = await fs.readFile('/etc/passwd');
+      const lines = pwd ? pwd.split('\n').filter(Boolean) : [];
+      for (const l of lines) {
+        if (l.split(':')[0] === username)
+          throw new Error(`useradd: user ${username} already exists`);
+      }
+      let maxUid = 1000;
+      for (const l of lines) {
+        const u = parseInt(l.split(':')[2]);
+        if (!isNaN(u) && u >= maxUid) maxUid = u + 1;
+      }
+      const uid = maxUid;
+      const home = `/home/${username}`;
+      lines.push(`${username}:x:${uid}:${uid}::${home}:/bin/sh`);
+      await fs.writeFile('/etc/passwd', `${lines.join('\n')}\n`);
+      try {
+        await fs.mkdir(home);
+      } catch {}
+      try {
+        await fs.chmod(home, 0o755);
+      } catch {}
+      await cout(`added user ${username} (uid ${uid})`);
+    },
+
+    async userdel(cout, username) {
+      if (!username) throw new Error('Usage: userdel <username>');
+      if (uidRef.value !== 0)
+        throw new Error('userdel: only root may delete users');
+      const pwd = await fs.readFile('/etc/passwd');
+      if (pwd === null) throw new Error('userdel: no users');
+      const filtered = pwd
+        .split('\n')
+        .filter((l) => l.split(':')[0] !== username);
+      if (filtered.length === pwd.split('\n').length)
+        throw new Error(`userdel: user ${username} not found`);
+      await fs.writeFile('/etc/passwd', `${filtered.join('\n')}\n`);
+      await cout(`deleted user ${username}`);
+    },
+
+    async passwd(cout, username) {
+      if (!username) throw new Error('Usage: passwd <username>');
+      if (
+        uidRef.value !== 0 &&
+        uidRef.value !==
+          parseInt(
+            (await fs.readFile('/etc/passwd'))
+              ?.split('\n')
+              .find((l) => l.split(':')[0] === username)
+              ?.split(':')[2] || '-1'
+          )
+      )
+        throw new Error('passwd: permission denied');
+
+      const pw = (await inputLine!()) || '';
+      if (pw.length < 2) throw new Error('passwd: password too short');
+
+      const shadow = (await fs.readFile('/etc/shadow')) || '';
+      const lines = shadow ? shadow.split('\n').filter(Boolean) : [];
+      const idx = lines.findIndex((l) => l.split(':')[0] === username);
+      const entry = `${username}:${simpleHash(pw)}`;
+      if (idx >= 0) lines[idx] = entry;
+      else lines.push(entry);
+      await fs.writeFile('/etc/shadow', `${lines.join('\n')}\n`);
+      await fs.chmod('/etc/shadow', 0o600); // 仅 root 可读写
+      await cout(`password set for ${username}`);
+    },
+
     // ---- 变量 --------------------------------------------------------------
 
     ['export']: async (cout, ...args) => {
@@ -470,6 +612,17 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
 
     ed: edHandler({ fs, cwd, inputLine }),
   };
+}
+
+// ---- 简单哈希（给 passwd 用）-----------------------------------------------
+
+function simpleHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h = h & h;
+  }
+  return Math.abs(h).toString(36);
 }
 
 // ---- 转义处理（给 echo 用）--------------------------------------------------

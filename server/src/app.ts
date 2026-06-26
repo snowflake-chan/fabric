@@ -16,8 +16,9 @@ const db = rateLimit(storage.getDataStorage('fabric_fs'), {
 });
 
 // 挂载真实文件系统到 /
+const uidRef = { value: 0 };
 const vfs = new FabricVFS();
-vfs.mount('/', new RootFS(new FabricFS(db)));
+vfs.mount('/', new RootFS(new FabricFS(db), uidRef));
 
 // 挂载设备到 /dev
 const devFs = new DevFS(vfs.bus);
@@ -92,7 +93,8 @@ const { shell } = createCLI(
   vfs,
   vfs,
   mountExternalStorage,
-  world.onTick.bind(world)
+  world.onTick.bind(world),
+  uidRef
 );
 
 // 初始化 TTY bridge（服务端 → RemoteChannel → 客户端 TTY UI）

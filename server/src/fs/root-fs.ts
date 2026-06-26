@@ -15,7 +15,22 @@ import {
 import { Path } from './path';
 
 export class RootFS implements IFileSystem {
-  constructor(private fs: FabricFS) {}
+  constructor(
+    private fs: FabricFS,
+    private uidRef?: { value: number }
+  ) {}
+
+  /** 权限检查：当前用户是否有指定权限位 */
+  private async checkAccess(id: number, need: number): Promise<boolean> {
+    if (!this.uidRef || this.uidRef.value === 0) return true; // root 通杀
+    const inode = await this.fs.getINode(id);
+    const uid = this.uidRef.value;
+    let bits = 0;
+    if (uid === inode.uid)
+      bits = (inode.mode >> 6) & 7; // owner
+    else bits = inode.mode & 7; // other
+    return (bits & need) === need;
+  }
 
   async init(): Promise<void> {
     await this.fs.init();
@@ -89,6 +104,7 @@ export class RootFS implements IFileSystem {
   async chmod(path: string, mode: number): Promise<void> {
     const id = await this.resolve(path);
     if (id === null) throw new Error(`ENOENT: ${path} not found`);
+    if (!(await this.checkAccess(id, 0o2))) throw new Error(`EACCES: ${path}`);
     const inode = await this.fs.getINode(id);
     inode.mode = mode;
     inode.ctime = Date.now();
@@ -98,6 +114,7 @@ export class RootFS implements IFileSystem {
   async readFile(path: string): Promise<string | null> {
     const id = await this.resolve(path);
     if (id === null) return null;
+    if (!(await this.checkAccess(id, 0o4))) throw new Error(`EACCES: ${path}`);
     const inode = await this.fs.getINode(id);
     if (inode.type !== 'file')
       throw new Error(`EISDIR: ${path} is a directory`);
@@ -111,6 +128,8 @@ export class RootFS implements IFileSystem {
 
   async writeFile(path: string, data: string): Promise<void> {
     const { parentId, name } = await this.resolveParent(path);
+    if (!(await this.checkAccess(parentId, 0o2)))
+      throw new Error(`EACCES: ${path}`);
     const useChunked = data.length > CHUNK_SIZE;
     const entries = await this.fs.getDirEntries(parentId);
     const existing = entries.find((e) => e.name === name);
@@ -177,6 +196,8 @@ export class RootFS implements IFileSystem {
 
   async mkdir(path: string): Promise<void> {
     const { parentId, name } = await this.resolveParent(path);
+    if (!(await this.checkAccess(parentId, 0o2)))
+      throw new Error(`EACCES: ${path}`);
     const existsId = await this.resolve(path);
     if (existsId !== null) throw new Error(`EEXIST: ${path} already exists`);
 
@@ -204,6 +225,7 @@ export class RootFS implements IFileSystem {
   async readdir(path: string): Promise<string[]> {
     const id = await this.resolve(path);
     if (id === null) throw new Error(`ENOENT: ${path} not found`);
+    if (!(await this.checkAccess(id, 0o4))) throw new Error(`EACCES: ${path}`);
     const inode = await this.fs.getINode(id);
     if (inode.type !== 'dir')
       throw new Error(`ENOTDIR: ${path} is not a directory`);
@@ -213,6 +235,8 @@ export class RootFS implements IFileSystem {
 
   async unlink(path: string): Promise<void> {
     const { parentId, name } = await this.resolveParent(path);
+    if (!(await this.checkAccess(parentId, 0o2)))
+      throw new Error(`EACCES: ${path}`);
     const before = await this.fs.getDirEntries(parentId);
     const first = before.find((e) => e.name === name);
 
@@ -238,6 +262,7 @@ export class RootFS implements IFileSystem {
   async rmdir(path: string): Promise<void> {
     const id = await this.resolve(path);
     if (id === null) throw new Error(`ENOENT: ${path} not found`);
+    if (!(await this.checkAccess(id, 0o2))) throw new Error(`EACCES: ${path}`);
 
     const inode = await this.fs.getINode(id);
     if (inode.type !== 'dir')
@@ -265,6 +290,7 @@ export class RootFS implements IFileSystem {
     if (path === '/') return;
     const id = await this.resolve(path);
     if (id === null) return;
+    if (!(await this.checkAccess(id, 0o2))) throw new Error(`EACCES: ${path}`);
 
     const inode = await this.fs.getINode(id);
 
