@@ -17,7 +17,7 @@ export function varCommands(
         if (eq !== -1) {
           const name = a.slice(0, eq);
           const val = a.slice(eq + 1);
-          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) vars.set(name, val);
+          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name) && val) vars.set(name, val);
         } else if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(a)) {
           if (!vars.has(a)) vars.set(a, '');
         }
@@ -25,6 +25,7 @@ export function varCommands(
     },
     async unset(_cout, name) {
       if (!name) throw new Error('Usage: unset <name>');
+      if (name === 'PATH') throw new Error('unset: PATH cannot be unset');
       vars.delete(name);
     },
     async env(cout) {
@@ -39,9 +40,7 @@ export function varCommands(
     async source(cout, path) {
       if (!path) throw new Error('Usage: source <file>');
       if (!execRef) throw new Error('source: execRef not available');
-      const content = await env.fs.readFile(
-        path.startsWith('/') ? path : `/${path}`
-      );
+      const content = await env.fs.readFile(_resolve(path));
       if (content === null) throw new Error(`ENOENT: ${path}`);
       for (const line of content.split('\n')) {
         const t = line.trim();

@@ -3,7 +3,6 @@ import { RootFS } from '@src/fs/root-fs';
 import { FabricVFS } from '@src/fs/fabric-vfs';
 import { DevFS } from '@src/fs/dev-fs';
 import { VirtualFS } from '@src/fs/virtual-fs';
-import { UserDaemon } from '@src/userd/daemon';
 import { createCLI } from '@src/shell/cli';
 import { rateLimit } from '@src/fs/rate-limiter';
 import { createTtyBridge } from '@src/shell/tty-bridge';
@@ -19,7 +18,11 @@ const db = rateLimit(storage.getDataStorage('fabric_fs'), {
 // 挂载真实文件系统到 /
 const uidRef = { value: 0 };
 const vfs = new FabricVFS();
-vfs.mount('/', new RootFS(new FabricFS(db), uidRef));
+const realFs = new FabricFS(db);
+vfs.mount('/', new RootFS(realFs, uidRef));
+
+// 特权 RootFS（uid 永远 0），影子操作专用，不提权共享 uidRef
+const privFs = new RootFS(new FabricFS(db), { value: 0 });
 
 // 挂载设备到 /dev
 const devFs = new DevFS(vfs.bus);
@@ -90,12 +93,14 @@ async function mountExternalStorage(
   vfs.mount(path, new RootFS(realFs));
 }
 
-const { shell } = createCLI(vfs, vfs, mountExternalStorage, uidRef);
+// CLI 用自己的 uidRef（始终 root），不跟 RootFS 共享
+const cliUidRef = { value: 0 };
+createCLI(vfs, vfs, mountExternalStorage, cliUidRef, undefined, uidRef, privFs);
 
 // 初始化 TTY bridge（服务端 → RemoteChannel → 客户端 TTY UI）
-createTtyBridge(shell);
+// 传入 uidRef 供 RootFS 权限同步
+createTtyBridge(vfs, vfs, mountExternalStorage, uidRef, privFs);
 
 vfs.init().then(() => {
-  new UserDaemon(vfs).mount();
   console.warn('✓ FabricVFS ready');
 });

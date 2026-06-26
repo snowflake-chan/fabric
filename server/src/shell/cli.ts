@@ -23,13 +23,23 @@ export function createCLI(
   vfs?: FabricVFS,
   mountStorage?: (path: string, storageId: string) => Promise<void>,
   uidRef?: { value: number },
-  extraHandlers?: Record<string, ExtraHandler>
+  extraHandlers?: Record<string, ExtraHandler>,
+  sharedUidRef?: { value: number },
+  privFs?: IFileSystem
 ) {
   const cout: Cout = async (line: string) => {
     console.log(line);
   };
 
-  const shell = createShell(fs, vfs, mountStorage, uidRef, extraHandlers);
+  const shell = createShell(
+    fs,
+    vfs,
+    mountStorage,
+    uidRef,
+    extraHandlers,
+    sharedUidRef,
+    privFs
+  );
 
   async function $(
     strings: TemplateStringsArray,

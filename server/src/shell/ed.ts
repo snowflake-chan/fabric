@@ -37,11 +37,12 @@ export function edHandler(env: EdEnv): ShellHandler {
     const { fs, cwd } = env;
     const { inputLine } = env;
     if (!inputLine) throw new Error('ed: interactive input not available');
-    const target = `${cwd()}/${filePath}`;
+    const fileName = Path.resolve(cwd(), filePath);
 
     // 读取文件到缓冲区
     const buf: string[] = [];
-    const existing = await fs.readFile(target);
+    const MAX_BUF = 100000;
+    const existing = await fs.readFile(fileName);
     if (existing !== null) {
       const lines = existing.split('\n');
       for (const l of lines) buf.push(l);
@@ -55,6 +56,12 @@ export function edHandler(env: EdEnv): ShellHandler {
     while (true) {
       const raw = ((await inputLine()) || '').trim();
       if (!raw) continue;
+
+      // wq = 保存并退出
+      if (raw === 'wq') {
+        await fs.writeFile(fileName, `${buf.join('\n')}\n`);
+        return;
+      }
 
       const m = raw.match(/^([.,$0-9]*)([a-zA-Z=]?)(.*)$/);
       if (!m) {
@@ -149,6 +156,10 @@ export function edHandler(env: EdEnv): ShellHandler {
           await cout('');
           let cnt = 0;
           while (true) {
+            if (buf.length >= MAX_BUF) {
+              await cout('?MAXBUF');
+              break;
+            }
             const l = await inputLine();
             if (l === '.' || l === undefined) break;
             buf.splice(at + cnt, 0, l);
@@ -163,6 +174,10 @@ export function edHandler(env: EdEnv): ShellHandler {
           await cout('');
           let cnt = 0;
           while (true) {
+            if (buf.length >= MAX_BUF) {
+              await cout('?MAXBUF');
+              break;
+            }
             const l = await inputLine();
             if (l === '.' || l === undefined) break;
             buf.splice(at + cnt, 0, l);
@@ -203,7 +218,7 @@ export function edHandler(env: EdEnv): ShellHandler {
           break;
         }
         case 'w': {
-          const outPath = cmdArg ? Path.resolve(cwd(), cmdArg) : target;
+          const outPath = cmdArg ? Path.resolve(cwd(), cmdArg) : fileName;
           await fs.writeFile(outPath, `${buf.join('\n')}\n`);
           await cout(String(buf.length));
           modified = false;

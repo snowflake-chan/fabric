@@ -257,27 +257,9 @@ export async function tryExecScript(
   const content = await ctx.fs.readFile(resolved);
   if (content === null) return { ok: false, error: `ENOENT: ${resolved}` };
 
-  // .js 文件 → 用 V8 执行
-  if (resolved.endsWith('.js')) {
-    try {
-      const fn = new Function(
-        'cout',
-        'args',
-        'fs',
-        'vars',
-        'cwd',
-        'uid',
-        content
-      );
-      await fn(cout, args, ctx.fs, ctx.vars, ctx.cwdRef, ctx.uidRef);
-      return { ok: true };
-    } catch (e) {
-      return {
-        ok: false,
-        error: `JS Error: ${e instanceof Error ? e.message : String(e)}`,
-      };
-    }
-  }
+  // .js 执行已禁用（安全考虑）
+  if (resolved.endsWith('.js'))
+    return { ok: false, error: 'JS scripts are disabled' };
 
   const oldArgs = ctx.vars.get('@');
   const oldArgv: string[] = [];

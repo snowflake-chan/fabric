@@ -22,13 +22,12 @@ export class RootFS implements IFileSystem {
 
   /** 权限检查：当前用户是否有指定权限位 */
   private async checkAccess(id: number, need: number): Promise<boolean> {
-    if (!this.uidRef || this.uidRef.value === 0) return true; // root 通杀
+    if (!this.uidRef || this.uidRef.value === 0) return true;
     const inode = await this.fs.getINode(id);
     const uid = this.uidRef.value;
     let bits = 0;
-    if (uid === inode.uid)
-      bits = (inode.mode >> 6) & 7; // owner
-    else bits = inode.mode & 7; // other
+    if (uid === inode.uid) bits = (inode.mode >> 6) & 7;
+    else bits = inode.mode & 7;
     return (bits & need) === need;
   }
 

@@ -30,7 +30,10 @@ export class VirtualFS implements IFileSystem {
   protected devices = new Map<string, VirtualDevice>();
   private sockets = new Map<string, EventSocket>();
 
-  constructor(private bus: EventBus) {
+  constructor(
+    private bus: EventBus,
+    private uidRef?: { value: number }
+  ) {
     this.devices.set('/', {
       stat: () => ({
         type: 'dir',
@@ -130,6 +133,21 @@ export class VirtualFS implements IFileSystem {
     return false;
   }
 
+  /** 检查当前用户是否有权限访问设备 */
+  private async checkAccess(
+    path: string,
+    dev: VirtualDevice,
+    need: number
+  ): Promise<boolean> {
+    if (!this.uidRef || this.uidRef.value === 0) return true;
+    if (!dev.stat) return true;
+    const s = await dev.stat();
+    let bits: number;
+    if (this.uidRef.value === s.uid) bits = (s.mode >> 6) & 7;
+    else bits = s.mode & 7;
+    return (bits & need) === need;
+  }
+
   // ------------------------------------------------------------------
   //  IFileSystem
   // ------------------------------------------------------------------
@@ -179,13 +197,17 @@ export class VirtualFS implements IFileSystem {
 
   async readFile(path: string): Promise<string | null> {
     const dev = this.getDevice(path);
-    if (dev?.readFile) return await dev.readFile();
-    return null;
+    if (!dev?.readFile) return null;
+    if (!(await this.checkAccess(path, dev, 4)))
+      throw new Error(`EACCES: ${path}`);
+    return await dev.readFile();
   }
 
   async writeFile(path: string, data: string): Promise<void> {
     const dev = this.getDevice(path);
     if (dev?.writeFile) {
+      if (!(await this.checkAccess(path, dev, 2)))
+        throw new Error(`EACCES: ${path}`);
       await dev.writeFile(data);
       return;
     }

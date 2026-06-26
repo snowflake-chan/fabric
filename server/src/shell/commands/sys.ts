@@ -1,4 +1,4 @@
-import { type CmdEnv, type ShellHandler } from './types';
+import { type CmdEnv, type ShellHandler, isRoot } from './types';
 import { getHandlers } from './helpers';
 import { Path } from '../../fs/path';
 
@@ -7,7 +7,7 @@ export function sysCommands(
   cwd: () => string,
   resolve: (p: string) => string
 ): Record<string, ShellHandler> {
-  const { fs, vfs, cwdRef, history, mountStorage, tasksRef } = env;
+  const { fs, vfs, cwdRef, history, mountStorage, tasksRef, uidRef } = env;
   return {
     async init(cout) {
       await fs.init();
@@ -47,13 +47,6 @@ export function sysCommands(
       for (let i = 0; i < history.length; i++)
         await cout(`${i + 1}  ${history[i]}`);
     },
-    async fabric(cout, flag) {
-      if (flag === '-v' || flag === '--version') {
-        await cout('FabricFS v0.2 -- ArenaPro virtual filesystem');
-        return;
-      }
-      throw new Error('Usage: fabric -v');
-    },
     async jobs(cout) {
       if (tasksRef)
         for (const t of tasksRef.list)
@@ -72,6 +65,8 @@ export function sysCommands(
       }
     },
     async mount(cout, path, storageId) {
+      if (!isRoot(uidRef))
+        throw new Error('mount: only root may mount filesystems');
       if (!vfs) throw new Error('mount: not available');
       if (path && storageId) {
         if (!mountStorage) throw new Error('mount: storage not available');
@@ -82,11 +77,15 @@ export function sysCommands(
       for (const m of vfs.getMounts()) await cout(`${m.prefix}  ${m.type}`);
     },
     async unmount(_cout, prefix) {
+      if (!isRoot(uidRef))
+        throw new Error('unmount: only root may unmount filesystems');
       if (!vfs) throw new Error('unmount: not available');
       if (!prefix) throw new Error('Usage: unmount <path>');
       vfs.unmount(prefix);
     },
     async format(cout, path) {
+      if (!isRoot(uidRef))
+        throw new Error('format: only root may format filesystems');
       if (path && vfs) {
         const target = Path.resolve(cwd(), path);
         const targetFs = vfs.getFs(target);

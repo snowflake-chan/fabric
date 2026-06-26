@@ -38,7 +38,13 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
   const cwd = () => cwdRef.value;
 
   function resolve(p: string): string {
-    return Path.resolve(cwd(), p || '.');
+    if (!p) return cwd();
+    // ~~ 展开~~ → home
+    const home = vars.get('HOME');
+    if (p === '~') return home || cwd();
+    if (p.startsWith('~/'))
+      return home ? home + p.slice(1) : Path.resolve(cwd(), p);
+    return Path.resolve(cwd(), p);
   }
 
   return {

@@ -1,6 +1,11 @@
-import { type ShellHandler } from '../shell/commands/types';
+import {
+  type ShellHandler,
+  type ShellResult,
+  type Cout,
+  isRoot,
+} from '../shell/commands/types';
 import { type IFileSystem } from '../fs/fabric-fs';
-import { simpleHash } from './helpers';
+import { hashPassword, verifyPassword } from './helpers';
 
 export interface UserEnv {
   fs: IFileSystem;
@@ -8,10 +13,67 @@ export interface UserEnv {
   cwdRef: { value: string };
   loggedInRef: { value: boolean };
   vars: Map<string, string>;
+  print?: (text: string) => Promise<void>;
+  requestPassword?: () => Promise<string>;
+  execRef?: (
+    input: string,
+    cout: Cout,
+    depth?: number,
+    inputLine?: () => Promise<string>,
+    print?: (text: string) => Promise<void>,
+    requestPassword?: () => Promise<string>
+  ) => Promise<ShellResult>;
+  /** 特权 RootFS（uid 永远 0），用于影子操作，不提权共享 uidRef */
+  privFs: IFileSystem;
 }
 
 function defInput(): Promise<string | undefined> {
   return new Promise(() => {});
+}
+
+/** 通过特权 FS 验证密码（不提权，无 race） */
+async function verifyPass(
+  privFs: IFileSystem,
+  user: string,
+  pass: string
+): Promise<boolean> {
+  try {
+    const shadow = await privFs.readFile('/etc/shadow');
+    if (shadow === null) return false;
+    for (const line of shadow.split('\n')) {
+      const idx = line.indexOf(':');
+      if (idx < 0) continue;
+      const f0 = line.slice(0, idx);
+      const f1 = line.slice(idx + 1);
+      if (f0 === user && f1 && verifyPassword(pass, f1)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** 通过特权 FS 合并写入 shadow（不提权，无 race） */
+async function writeShadow(
+  privFs: IFileSystem,
+  username: string,
+  hash: string
+): Promise<void> {
+  const existing = (await privFs.readFile('/etc/shadow')) || '';
+  const lines = existing.split('\n').filter(Boolean);
+  const newLine = `${username}:${hash}`;
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    const idx = lines[i].indexOf(':');
+    if (idx >= 0 && lines[i].slice(0, idx) === username) {
+      lines[i] = newLine;
+      found = true;
+      break;
+    }
+  }
+  if (!found) lines.push(newLine);
+  await privFs.writeFile('/etc/shadow', `${lines.join('\n')}\n`);
+  await privFs.chmod('/etc/shadow', 0o600);
 }
 
 export function createUserCommands(
@@ -19,33 +81,19 @@ export function createUserCommands(
   inputLine?: () => Promise<string | undefined>
 ): Record<string, ShellHandler> | null {
   if (!env.uidRef || !env.loggedInRef) return null;
-  const { fs, uidRef, cwdRef, loggedInRef } = env;
+  const {
+    fs,
+    uidRef,
+    cwdRef,
+    loggedInRef,
+    vars,
+    print,
+    requestPassword,
+    execRef,
+    privFs,
+  } = env;
   const il: () => Promise<string> = (inputLine ||
     defInput) as () => Promise<string>;
-
-  // shadow 操作通过 daemon 设备（/run/userd/），走文件系统，不提权
-  const shadowHash = async (user: string): Promise<string> => {
-    try {
-      const s = await fs.readFile('/run/userd/shadow-get');
-      if (s === null) return '';
-      for (const l of s.split('\n')) {
-        const sp = l.split(':');
-        if (sp[0] === user && sp[1]) return sp[1];
-      }
-    } catch {
-      /* daemon 未安装，返回空 */
-    }
-    return '';
-  };
-  const verifyPass = async (user: string, pass: string): Promise<boolean> => {
-    try {
-      await fs.writeFile('/run/userd/verify', `${user}:${pass}`);
-      const r = await fs.readFile('/run/userd/verify-result');
-      return r?.trim() === 'ok';
-    } catch {
-      return false;
-    }
-  };
 
   const whoami: ShellHandler = async (cout) => {
     const pwd = await fs.readFile('/etc/passwd');
@@ -88,17 +136,56 @@ export function createUserCommands(
       }
     }
     if (targetUid < 0) throw new Error(`su: unknown user ${targetUser}`);
-    const pw = (await il()) || '';
-    if (!(await verifyPass(targetUser, pw)))
+    if (print) await print('Password: ');
+    const pw = (await (requestPassword ? requestPassword() : il())) || '';
+    if (!(await verifyPass(privFs, targetUser, pw)))
       throw new Error('su: incorrect password');
     uidRef.value = targetUid;
     cwdRef.value = home;
     await cout('');
   };
 
+  const sudo: ShellHandler = async (cout, ...rest) => {
+    if (rest.length === 0) throw new Error('Usage: sudo <command>');
+    if (!isRoot(uidRef)) {
+      let userName = '';
+      const pwd = await fs.readFile('/etc/passwd');
+      if (pwd !== null) {
+        for (const l of pwd.split('\n')) {
+          const p = l.split(':');
+          if (p.length >= 3 && parseInt(p[2]) === uidRef.value) {
+            userName = p[0];
+            break;
+          }
+        }
+      }
+      // 检查 sudoers 列表
+      const list = await fs.readFile('/etc/sudoers');
+      const allowed =
+        list !== null && list.split('\n').some((l) => l.trim() === userName);
+      if (!allowed)
+        throw new Error(
+          `sudo: ${userName || uidRef.value} is not in the sudoers list`
+        );
+      if (print)
+        await print(`[sudo] password for ${userName || uidRef.value}: `);
+      const pw = (await (requestPassword ? requestPassword() : il())) || '';
+      if (print) await print('\n');
+      if (!(await verifyPass(privFs, userName, pw)))
+        throw new Error('sudo: incorrect password');
+    }
+    const saved = uidRef.value;
+    uidRef.value = 0;
+    try {
+      if (execRef) await execRef(rest.join(' '), cout);
+    } finally {
+      uidRef.value = saved;
+    }
+  };
+
   const useradd: ShellHandler = async (cout, username) => {
     if (!username) throw new Error('Usage: useradd <username>');
-    if (uidRef.value !== 0) throw new Error('useradd: only root may add users');
+    if (!isRoot(uidRef)) throw new Error('useradd: only root may add users');
     const pwd = await fs.readFile('/etc/passwd');
     const lines = pwd ? pwd.split('\n').filter(Boolean) : [];
     for (const l of lines) {
@@ -114,23 +201,18 @@ export function createUserCommands(
       home = `/home/${username}`;
     lines.push(`${username}:x:${uid}:${uid}::${home}:/bin/sh`);
     await fs.writeFile('/etc/passwd', `${lines.join('\n')}\n`);
-    const saved = uidRef.value;
-    uidRef.value = uid;
-    try {
-      await fs.mkdir(home);
-    } catch {}
-    try {
-      await fs.chmod(home, 0o755);
-    } catch {}
-    uidRef.value = saved;
+    // 以 root 身份创建 home 目录后再 chown
+    await fs.mkdir(home).catch(() => {});
+    await fs.chmod(home, 0o755).catch(() => {});
     await fs.chown(home, uid);
+    // 初始化 shadow 条目（! 表示无密码，不可登录）
+    await writeShadow(privFs, username, '!');
     await cout(`added user ${username} (uid ${uid})`);
   };
 
   const userdel: ShellHandler = async (cout, username) => {
     if (!username) throw new Error('Usage: userdel <username>');
-    if (uidRef.value !== 0)
-      throw new Error('userdel: only root may delete users');
+    if (!isRoot(uidRef)) throw new Error('userdel: only root may delete users');
     const pwd = await fs.readFile('/etc/passwd');
     if (pwd === null) throw new Error('userdel: no users');
     const filtered = pwd
@@ -145,7 +227,7 @@ export function createUserCommands(
   const passwd: ShellHandler = async (cout, username) => {
     if (!username) throw new Error('Usage: passwd <username>');
     if (
-      uidRef.value !== 0 &&
+      !isRoot(uidRef) &&
       !(await fs.readFile('/etc/passwd'))
         ?.split('\n')
         .some(
@@ -155,18 +237,15 @@ export function createUserCommands(
         )
     )
       throw new Error('passwd: permission denied');
-    const pw = (await il()) || '';
+    const pw = (await (requestPassword ? requestPassword() : il())) || '';
     if (pw.length < 2) throw new Error('passwd: password too short');
-    await fs.writeFile(
-      '/run/userd/shadow-set',
-      `${username}:${simpleHash(pw)}\n`
-    );
+    await writeShadow(privFs, username, hashPassword(pw));
     await cout(`password set for ${username}`);
   };
 
   const login: ShellHandler = async (cout) => {
     while (true) {
-      await cout('Username: ');
+      if (print) await print('Username: ');
       const user = (await il()) || '';
       if (!user) continue;
       const pwd = await fs.readFile('/etc/passwd');
@@ -184,19 +263,22 @@ export function createUserCommands(
         await cout('login: unknown user');
         continue;
       }
-      await cout('Password: ');
-      const pw = (await il()) || '';
-      if (!(await verifyPass(user, pw))) {
+      if (print) await print('Password: ');
+      const pw = (await (requestPassword ? requestPassword() : il())) || '';
+      if (!(await verifyPass(privFs, user, pw))) {
         await cout('login: incorrect password');
         continue;
       }
       uidRef.value = uid;
       loggedInRef.value = true;
-      if (home) cwdRef.value = home;
-      await cout(`Welcome, ${user}`);
+      if (home) {
+        cwdRef.value = home;
+        vars.set('HOME', home);
+      }
+      await cout(`Welcome, ${user}\n`);
       return;
     }
   };
 
-  return { whoami, id, su, useradd, userdel, passwd, login };
+  return { whoami, id, su, sudo, useradd, userdel, passwd, login };
 }

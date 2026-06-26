@@ -1,4 +1,4 @@
-import { type CmdEnv, type ShellHandler } from './types';
+import { type CmdEnv, type ShellHandler, isRoot } from './types';
 import { Path } from '../../fs/path';
 import { processEscapes } from './helpers';
 
@@ -90,6 +90,25 @@ export function fsCommands(
       if (content === null) throw new Error(`ENOENT: ${resolve(src)}`);
       await fs.writeFile(resolve(dst), content);
     },
+    async chown(cout, owner, path) {
+      if (!owner || !path) throw new Error('Usage: chown <user> <path>');
+      if (!isRoot(env.uidRef))
+        throw new Error('chown: only root may change ownership');
+      let uid = NaN;
+      const pwd = await fs.readFile('/etc/passwd');
+      if (pwd !== null) {
+        for (const l of pwd.split('\n')) {
+          const p = l.split(':');
+          if (p[0] === owner) {
+            uid = parseInt(p[2]);
+            break;
+          }
+        }
+      }
+      if (isNaN(uid)) throw new Error(`chown: unknown user: ${owner}`);
+      await fs.chown(resolve(path), uid);
+    },
+
     async touch(_cout, path) {
       const target = resolve(path);
       const st = await fs.stat(target);

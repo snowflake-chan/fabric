@@ -14,6 +14,7 @@ import {
   createHandlers,
   setAllHandlers,
 } from './commands/index';
+import { Path } from '../fs/path';
 import { tokenize, splitSemicolon, parseLogical, parsePipe } from './tokenizer';
 import {
   expandSubstitutions,
@@ -32,15 +33,22 @@ export function createShell(
   vfs?: FabricVFS,
   mountStorage?: (path: string, storageId: string) => Promise<void>,
   uidRef?: { value: number },
-  extraHandlers?: Record<string, ShellHandler>
+  extraHandlers?: Record<string, ShellHandler>,
+  /** 共享的 RootFS uidRef，handlers 直接用它 */
+  sharedUidRef?: { value: number },
+  /** 特权 RootFS（uid 永远 0），影子操作不走共享 uidRef 提权 */
+  privFs?: IFileSystem
 ) {
   const cwdRef = { value: '/' };
   const hasUsers = !!uidRef;
+  // handlers 直接操作 sharedUidRef，提权即时生效到 RootFS
   if (!uidRef) uidRef = { value: 0 };
+  const effectiveUidRef = sharedUidRef || uidRef;
   const loggedInRef = hasUsers ? { value: false } : undefined;
   const history: string[] = [];
   const MAX_HISTORY = 100;
   const vars = new Map<string, string>();
+  vars.set('PATH', '/bin');
   const pipeInputRef = { value: null as string | null };
 
   // ---- 任务管理 -----------------------------------------------------------
@@ -59,10 +67,16 @@ export function createShell(
     },
   };
 
+  const MAX_TASKS = 50;
+
   function addTask(name: string, promise: Promise<unknown>): number {
     const id = nextTaskId++;
     const task: Task = { id, name, status: 'running', cancelled: false };
     tasks.push(task);
+    if (tasks.length > MAX_TASKS) {
+      const done = tasks.filter((t) => t.status !== 'running');
+      if (done.length > 0) tasks.splice(0, done.length);
+    }
     promise.then(
       () => {
         task.status = 'completed';
@@ -78,7 +92,7 @@ export function createShell(
     fs,
     vfs,
     cwdRef,
-    uidRef,
+    uidRef: effectiveUidRef,
     loggedInRef,
     vars,
     pipeInputRef,
@@ -87,11 +101,33 @@ export function createShell(
     getHandler: (n) => handlers[n],
     mountStorage,
     inputLine: () => currentInputLine?.(),
+    print: async (text) => {
+      if (currentPrint) await currentPrint(text);
+    },
+    requestPassword: async () => {
+      if (currentRequestPassword) return currentRequestPassword();
+      return '';
+    },
     execRef: exec,
   });
   if (hasUsers) {
     const userCmds = createUserCommands(
-      { fs, uidRef, cwdRef, loggedInRef: loggedInRef!, vars },
+      {
+        fs,
+        uidRef: effectiveUidRef,
+        cwdRef,
+        loggedInRef: loggedInRef!,
+        vars,
+        print: async (t) => {
+          if (currentPrint) await currentPrint(t);
+        },
+        requestPassword: async () => {
+          if (currentRequestPassword) return currentRequestPassword();
+          return '';
+        },
+        execRef: exec,
+        privFs: privFs || fs,
+      },
       () => Promise.resolve(currentInputLine?.())
     );
     if (userCmds) Object.assign(handlers, userCmds);
@@ -100,13 +136,15 @@ export function createShell(
   setAllHandlers(handlers);
 
   let currentInputLine: (() => Promise<string>) | undefined;
+  let currentPrint: ((text: string) => Promise<void>) | undefined;
+  let currentRequestPassword: (() => Promise<string>) | undefined;
 
   // 脚本上下文
   const scriptCtx: ScriptContext = {
     fs,
     cwdRef,
     vars,
-    uidRef,
+    uidRef: effectiveUidRef,
     exec,
     tokenize,
   };
@@ -115,9 +153,13 @@ export function createShell(
     input: string,
     cout: Cout,
     depth = 0,
-    inputLine?: () => Promise<string>
+    inputLine?: () => Promise<string>,
+    print?: (text: string) => Promise<void>,
+    requestPassword?: () => Promise<string>
   ): Promise<ShellResult> {
-    currentInputLine = inputLine;
+    if (inputLine !== undefined) currentInputLine = inputLine;
+    if (print !== undefined) currentPrint = print;
+    if (requestPassword !== undefined) currentRequestPassword = requestPassword;
     const trimmed = input.trim();
     if (!trimmed) return { ok: true };
 
@@ -130,10 +172,10 @@ export function createShell(
       return { ok: true };
     }
 
-    if (loggedInRef && !loggedInRef.value && trimmed !== 'login') {
-      await cout('Please login first (login)');
-      return { ok: false, error: 'not logged in' };
-    }
+    // if (!skipLoginCheck && loggedInRef && !loggedInRef.value && trimmed !== 'login') {
+    //   await cout('Please login first (login)');
+    //   return { ok: false, error: 'not logged in' };
+    // }
 
     const expanded =
       trimmed === '!!' ? (history[history.length - 1] ?? '') : trimmed;
@@ -279,7 +321,7 @@ export function createShell(
       const rawPath = cmdArgs[inRedirIdx + 1];
       if (!rawPath || rawPath.startsWith('-'))
         return { ok: false, error: 'syntax error: < without target' };
-      const target = `/${rawPath.startsWith('/') ? rawPath.slice(1) : `${cwdRef.value.slice(1)}/${rawPath}`}`;
+      const target = Path.resolve(cwdRef.value, rawPath);
       const content = await fs.readFile(target);
       if (content === null) return { ok: false, error: `ENOENT: ${target}` };
       pipeInputRef.value = content;
@@ -308,12 +350,12 @@ export function createShell(
       }
     }
 
-    if (hasRedirect) {
+    if (hasRedirect && cmdName !== 'sudo') {
       const idx = redirectAppend ? redirIdx : redirSglIdx;
       const rawPath = runArgs[idx + 1];
       if (!rawPath || rawPath.startsWith('-'))
         return { ok: false, error: 'syntax error: redirect without target' };
-      redirectTarget = `/${rawPath.startsWith('/') ? rawPath.slice(1) : `${cwdRef.value.slice(1)}/${rawPath}`}`;
+      redirectTarget = Path.resolve(cwdRef.value, rawPath);
       runArgs = runArgs.slice(0, idx).concat(runArgs.slice(idx + 2));
       runCout = async (l) => {
         captured.push(l);
@@ -322,6 +364,18 @@ export function createShell(
 
     const handler = handlers[cmdName];
     if (!handler) {
+      // PATH 查找（仅纯命令名，含 / 或 . 的直接走 tryExecScript）
+      if (!cmdName.includes('/') && !cmdName.startsWith('.')) {
+        const pathDirs = (vars.get('PATH') || '/bin').split(':');
+        for (const dir of pathDirs) {
+          const sp = `${dir}/${cmdName}`;
+          const r = await tryExecScript(sp, runArgs, runCout, depth, scriptCtx);
+          if (r !== null) {
+            await writeRedirect();
+            return r;
+          }
+        }
+      }
       const scriptResult = await tryExecScript(
         cmdName,
         runArgs,
@@ -352,5 +406,18 @@ export function createShell(
     exec,
     history: history as readonly string[],
     cwd: () => cwdRef.value,
+    uid: () => effectiveUidRef.value,
+    user: async () => {
+      if (effectiveUidRef.value === 0) return 'root';
+      const pwd = await fs.readFile('/etc/passwd');
+      if (pwd !== null) {
+        for (const l of pwd.split('\n')) {
+          const p = l.split(':');
+          if (p.length >= 3 && parseInt(p[2]) === effectiveUidRef.value)
+            return p[0];
+        }
+      }
+      return String(effectiveUidRef.value);
+    },
   };
 }
