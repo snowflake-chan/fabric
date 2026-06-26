@@ -23,7 +23,7 @@ import { Path } from '../fs/path';
 type Cout = (line: string) => Promise<void>;
 type ShellHandler = (cout: Cout, ...args: string[]) => Promise<void>;
 
-import { type IFileSystem } from '../fs/file-system';
+import { type IFileSystem } from '../fs/fabric-fs';
 
 interface EdEnv {
   fs: IFileSystem;
@@ -147,24 +147,28 @@ export function edHandler(env: EdEnv): ShellHandler {
         case 'a': {
           const at = addr ? addr.end : cur;
           await cout('');
+          let cnt = 0;
           while (true) {
             const l = await inputLine();
             if (l === '.' || l === undefined) break;
-            buf.splice(at, 0, l);
+            buf.splice(at + cnt, 0, l);
+            cnt++;
           }
-          cur = at;
+          cur = at + cnt;
           modified = true;
           break;
         }
         case 'i': {
           const at = addr ? addr.start - 1 : cur - 1;
           await cout('');
+          let cnt = 0;
           while (true) {
             const l = await inputLine();
             if (l === '.' || l === undefined) break;
-            buf.splice(at, 0, l);
+            buf.splice(at + cnt, 0, l);
+            cnt++;
           }
-          cur = at + 1;
+          cur = at + cnt;
           modified = true;
           break;
         }

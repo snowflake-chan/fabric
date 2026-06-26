@@ -5,9 +5,9 @@
  * 路由时会剥离 mount 前缀，使子 FS 路径始终以 / 开头。
  */
 
-import { type IFileSystem, type FileStat } from './file-system';
-import { DevFS } from './dev-fs';
-import type { VirtualDevice } from './dev-fs';
+import { type IFileSystem, type FileStat } from './fabric-fs';
+import { VirtualFS } from './virtual-fs';
+import type { VirtualDevice } from './virtual-fs';
 import { EventBus } from './event-bus';
 import { type EventSocket } from './event-socket';
 import { Path } from './path';
@@ -54,7 +54,7 @@ export class FabricVFS implements IFileSystem {
     const result: Array<{ prefix: string; type: string }> = [];
     result.push({ prefix: '/', type: 'rootfs' });
     for (const [prefix, fs] of this.mounts) {
-      const type = fs instanceof DevFS ? 'devfs' : 'rootfs';
+      const type = fs instanceof VirtualFS ? 'devfs' : 'rootfs';
       result.push({ prefix, type });
     }
     return result;
@@ -78,24 +78,24 @@ export class FabricVFS implements IFileSystem {
   registerDevice(path: string, handler: VirtualDevice): void {
     const prefix = Path.parent(path);
     const r = this.resolve(prefix);
-    if (!r || !(r.fs instanceof DevFS)) {
-      const dev = new DevFS(this.bus);
+    if (!r || !(r.fs instanceof VirtualFS)) {
+      const dev = new VirtualFS(this.bus);
       this.mount(prefix, dev);
       dev.registerDevice(path, handler);
       return;
     }
-    (r.fs as DevFS).registerDevice(path, handler);
+    (r.fs as VirtualFS).registerDevice(path, handler);
   }
 
   registerSocket(path: string): EventSocket {
     const prefix = Path.parent(path);
     const r = this.resolve(prefix);
-    if (!r || !(r.fs instanceof DevFS)) {
-      const dev = new DevFS(this.bus);
+    if (!r || !(r.fs instanceof VirtualFS)) {
+      const dev = new VirtualFS(this.bus);
       this.mount(prefix, dev);
       return dev.registerSocket(path);
     }
-    return (r.fs as DevFS).registerSocket(path);
+    return (r.fs as VirtualFS).registerSocket(path);
   }
 
   // ------------------------------------------------------------------

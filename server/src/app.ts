@@ -1,7 +1,8 @@
-import { FabricFS } from '@src/fs/file-system';
+import { FabricFS } from '@src/fs/fabric-fs';
 import { RootFS } from '@src/fs/root-fs';
 import { FabricVFS } from '@src/fs/fabric-vfs';
 import { DevFS } from '@src/fs/dev-fs';
+import { VirtualFS } from '@src/fs/virtual-fs';
 import { createCLI } from '@src/shell/cli';
 import { rateLimit } from '@src/fs/rate-limiter';
 import { createTtyBridge } from '@src/shell/tty-bridge';
@@ -23,7 +24,7 @@ const devFs = new DevFS(vfs.bus);
 vfs.mount('/dev', devFs);
 
 // 挂载 Box3 API 到 /sys
-const sysFs = new DevFS(vfs.bus);
+const sysFs = new VirtualFS(vfs.bus);
 
 sysFs.registerDevice('/say', {
   stat: () => ({

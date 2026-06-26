@@ -11,7 +11,7 @@
  */
 
 import { createShell, type Cout } from './shell';
-import { type IFileSystem } from '../fs/file-system';
+import { type IFileSystem } from '../fs/fabric-fs';
 import { type FabricVFS } from '../fs/fabric-vfs';
 
 // ---- CLI 工厂 ---------------------------------------------------------------

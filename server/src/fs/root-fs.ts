@@ -11,7 +11,7 @@ import {
   type INode,
   type FabricFS,
   CHUNK_SIZE,
-} from './file-system';
+} from './fabric-fs';
 import { Path } from './path';
 
 export class RootFS implements IFileSystem {

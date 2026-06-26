@@ -5,7 +5,7 @@
  * 所有命令 handler 在 commands.ts 中统一管理。
  */
 
-import { type IFileSystem } from '../fs/file-system';
+import { type IFileSystem } from '../fs/fabric-fs';
 import { type FabricVFS } from '../fs/fabric-vfs';
 import { Path } from '../fs/path';
 import { type Cout, createHandlers, setAllHandlers } from './commands';
@@ -373,7 +373,7 @@ export function createShell(
 
     async function writeRedirect(): Promise<void> {
       if (!redirectTarget) return;
-      const content = captured.join('\n') + (captured.length > 0 ? '\n' : '');
+      const content = captured.join('\n');
       if (redirectAppend) {
         const existing = await fs.readFile(redirectTarget);
         await fs.writeFile(redirectTarget, (existing ?? '') + content);
