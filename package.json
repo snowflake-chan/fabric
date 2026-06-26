@@ -1,0 +1,35 @@
+{
+  "name": "fabric",
+  "version": "1.0.0",
+  "description": "A file system attaching on storage for box3",
+  "main": "server/dist/server/src/App.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "eslint:fix": "eslint --fix",
+    "prettier:write": "prettier . --write",
+    "prettier:check": "prettier . --check",
+    "prepare": "husky"
+  },
+  "author": "snowflake-chan",
+  "license": "ISC",
+  "files": [
+    "server/dist/server/src/**/*"
+  ],
+  "types": "server/dist/server/src/App.d.ts",
+  "devDependencies": {
+    "@types/dotenv-webpack": "^7.0.8",
+    "acorn": "^8.17.0",
+    "dotenv-webpack": "^9.0.0",
+    "eslint": "^10.5.0",
+    "husky": "^9.1.7",
+    "i18next": "^26.3.2",
+    "lint-staged": "^17.0.8",
+    "prettier": "^3.8.4",
+    "terser-webpack-plugin": "^5.6.1",
+    "ts-loader": "^9.6.2",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.62.0",
+    "webpack": "^5.108.0",
+    "webpack-cli": "^7.0.3"
+  }
+}
