@@ -16,18 +16,18 @@ FabricFS 是一个基于游戏引擎 **ArenaPro（Box3）** 的 `GameDataStorage
 
 ```
 server/                         服务端（引擎）
-  src/App.ts                    — 入口，组装所有模块
+  src/app.ts                    — 入口，组装所有模块
   src/fs/
-    FileSystem.ts               — 文件系统核心（INode + 分块 KV 存储）
-    RateLimiter.ts              — GameDataStorage 限流包装（token bucket）
+    file-system.ts              — 文件系统核心（INode + 分块 KV 存储）
+    rate-limiter.ts             — GameDataStorage 限流包装（token bucket）
   src/shell/
-    DebugShell.ts               — shell 逻辑（命令解析 + cout 输出）
-    Cli.ts                      — 终端界面（console 层）
-    TtyBridge.ts                — RemoteChannel 桥接（服务端 ←→ 客户端）
+    shell.ts                    — shell 逻辑（命令解析 + cout 输出）
+    cli.ts                      — 终端界面（console 层）
+    tty-bridge.ts               — RemoteChannel 桥接（服务端 ←→ 客户端）
 
 client/                         客户端（浏览器 UI）
-  src/clientApp.ts              — 入口
-  src/tty/TtyUI.ts              — TTY 终端 UI（ClientUI 实现）
+  src/client-app.ts             — 入口
+  src/tty/tty-ui.ts             — TTY 终端 UI（ClientUI 实现）
 
 types/                          引擎类型声明
   GameAPI.d.ts                  — 服务端 API（GameDataStorage 等）
@@ -39,8 +39,8 @@ types/                          引擎类型声明
 
 ```sh
 # 通过 DAO3 / ArenaPro 编辑器构建上传（dao3.config.json 配置入口）
-# 服务端入口: server/src/App.ts
-# 客户端入口: client/src/clientApp.ts
+# 服务端入口: server/src/app.ts
+# 客户端入口: client/src/client-app.ts
 # 输出: bundle.js（云端热更）
 ```
 
@@ -133,7 +133,7 @@ final_position = parent_size * scale + offset
 
 ### 命名
 
-- 文件: PascalCase（组件/类）或 camelCase（工具函数）
+- 文件: kebab-case
 - 路径别名: `@src/*`, `@server/*`, `@client/*`, `@shares/*`, `@root/*`
 
 ### 文件系统存储格式
@@ -147,7 +147,7 @@ C:{id}:{n}   →  第 n 个数据分块                       大文件分块
 
 ## 限流
 
-`RateLimiter.ts` 用 token bucket 包装 `GameDataStorage`：
+`rate-limiter.ts` 用 token bucket 包装 `GameDataStorage`：
 
 - 读操作（get, list）: 20 ops/s
 - 写操作（set, update, remove, increment, destroy）: 10 ops/s
@@ -169,15 +169,15 @@ handler 只调 `await cout(line)`，不返回数据。`ShellResult` 简化为 `{
 
 ```
 server/src/
-  App.ts                — 入口
+  app.ts                — 入口
   fs/
-    FileSystem.ts       — 文件系统核心
-    RateLimiter.ts      — 存储限流
+    file-system.ts      — 文件系统核心
+    rate-limiter.ts     — 存储限流
   shell/
-    DebugShell.ts       — shell 逻辑（handler + cout）
-    Cli.ts              — 终端界面（console）
-    TtyBridge.ts        — RemoteChannel 桥接
+    shell.ts            — shell 逻辑（handler + cout）
+    cli.ts              — 终端界面（console）
+    tty-bridge.ts       — RemoteChannel 桥接
 client/src/
-  clientApp.ts          — 客户端入口
-  tty/TtyUI.ts          — TTY 终端 UI
+  client-app.ts          — 客户端入口
+  tty/tty-ui.ts          — TTY 终端 UI
 ```

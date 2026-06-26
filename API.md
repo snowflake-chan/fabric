@@ -60,7 +60,7 @@ interface FileStat {
 
 ## FabricFS — 底层存储
 
-文件位置：`server/src/fs/FileSystem.ts`
+文件位置：`server/src/fs/file-system.ts`
 
 直接操作 KV 存储，管理 INode、目录条目、大文件分块。所有方法都有缓存（`inodeCache` + `dirCache`），写操作同步更新或失效缓存。
 
@@ -161,7 +161,7 @@ writeChunked(id: number, data: string): Promise<number>
 
 ## FabricVFS — 虚拟文件系统层
 
-文件位置：`server/src/fs/FabricVFS.ts`
+文件位置：`server/src/fs/fabric-vfs.ts`
 
 实现 `IFileSystem`，在 `FabricFS` 之上提供：
 
@@ -265,8 +265,8 @@ vfs.registerDevice('/dev/random', {
 ## 使用流程
 
 ```typescript
-import { FabricFS } from '@src/fs/FileSystem';
-import { FabricVFS } from '@src/fs/FabricVFS';
+import { FabricFS } from '@src/fs/file-system';
+import { FabricVFS } from '@src/fs/fabric-vfs';
 
 const db = rateLimit(storage.getDataStorage('fabric_fs'), {
   readsPerSec: 20,
@@ -321,17 +321,17 @@ input → !! 展开 → 历史记录 → 命令替换 $(...)
 
 ## 类型引用速查
 
-| 符号            | 文件            | 导出 |
-| --------------- | --------------- | ---- |
-| `IFileSystem`   | `FileSystem.ts` | 是   |
-| `FileStat`      | `FileSystem.ts` | 是   |
-| `FSMeta`        | `FileSystem.ts` | 是   |
-| `INode`         | `FileSystem.ts` | 是   |
-| `DirEntry`      | `FileSystem.ts` | 是   |
-| `CHUNK_SIZE`    | `FileSystem.ts` | 是   |
-| `FabricFS`      | `FileSystem.ts` | 是   |
-| `FabricVFS`     | `FabricVFS.ts`  | 是   |
-| `VirtualDevice` | `FabricVFS.ts`  | 是   |
-| `Cout`          | `Shell.ts`      | 是   |
-| `ShellResult`   | `Shell.ts`      | 是   |
-| `createShell`   | `Shell.ts`      | 是   |
+| 符号            | 文件             | 导出 |
+| --------------- | ---------------- | ---- |
+| `IFileSystem`   | `file-system.ts` | 是   |
+| `FileStat`      | `file-system.ts` | 是   |
+| `FSMeta`        | `file-system.ts` | 是   |
+| `INode`         | `file-system.ts` | 是   |
+| `DirEntry`      | `file-system.ts` | 是   |
+| `CHUNK_SIZE`    | `file-system.ts` | 是   |
+| `FabricFS`      | `file-system.ts` | 是   |
+| `FabricVFS`     | `fabric-vfs.ts`  | 是   |
+| `VirtualDevice` | `fabric-vfs.ts`  | 是   |
+| `Cout`          | `Shell.ts`       | 是   |
+| `ShellResult`   | `Shell.ts`       | 是   |
+| `createShell`   | `Shell.ts`       | 是   |
