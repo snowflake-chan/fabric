@@ -1,4 +1,5 @@
 import { FabricFS } from '@src/fs/FileSystem';
+import { FabricVFS } from '@src/fs/FabricVFS';
 import { createCLI } from '@src/shell/Cli';
 import { rateLimit } from '@src/fs/RateLimiter';
 import { createTtyBridge } from '@src/shell/TtyBridge';
@@ -11,10 +12,11 @@ const db = rateLimit(storage.getDataStorage('fabric_fs'), {
   writesPerSec: 10,
 });
 
-const fs = new FabricFS(db);
+const realFs = new FabricFS(db);
+const fs = new FabricVFS(realFs);
 const { shell } = createCLI(fs);
 
 // 初始化 TTY bridge（服务端 → RemoteChannel → 客户端 TTY UI）
 createTtyBridge(shell);
 
-fs.init().then(() => console.warn('✓ FabricFS ready'));
+fs.init().then(() => console.warn('✓ FabricVFS ready'));

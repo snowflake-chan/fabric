@@ -11,11 +11,11 @@
  */
 
 import { createShell, type Cout } from './Shell';
-import { type FabricFS } from '../fs/FileSystem';
+import { type IFileSystem } from '../fs/FileSystem';
 
 // ---- CLI 工厂 ---------------------------------------------------------------
 
-export function createCLI(fs: FabricFS) {
+export function createCLI(fs: IFileSystem) {
   const cout: Cout = async (line: string) => {
     console.log(line);
   };

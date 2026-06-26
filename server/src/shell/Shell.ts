@@ -10,7 +10,7 @@
  *   if (!r.ok) console.error(r.error);
  */
 
-import { type FabricFS } from '../fs/FileSystem';
+import { type IFileSystem } from '../fs/FileSystem';
 
 // ---- 类型 ------------------------------------------------------------------
 
@@ -143,7 +143,7 @@ function parseLogical(
 // ---- 流式 tree（逐行 emit）---------------------------------------------------
 
 async function streamTree(
-  fs: FabricFS,
+  fs: IFileSystem,
   dirPath: string,
   prefix: string,
   emit: (line: string) => Promise<void>
@@ -180,7 +180,7 @@ function processEscapes(s: string): string {
 
 type ShellHandler = (cout: Cout, ...args: string[]) => Promise<void>;
 
-export function createShell(fs: FabricFS) {
+export function createShell(fs: IFileSystem) {
   let cwd = '/';
   const history: string[] = [];
   const MAX_HISTORY = 100;
