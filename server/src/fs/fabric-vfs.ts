@@ -5,12 +5,12 @@
  * 路由时会剥离 mount 前缀，使子 FS 路径始终以 / 开头。
  */
 
-import { type IFileSystem, type FileStat } from './FileSystem';
-import { DevFS } from './DevFS';
-import type { VirtualDevice } from './DevFS';
-import { EventBus } from './EventBus';
-import { type EventSocket } from './EventSocket';
-import { Path } from './Path';
+import { type IFileSystem, type FileStat } from './file-system';
+import { DevFS } from './dev-fs';
+import type { VirtualDevice } from './dev-fs';
+import { EventBus } from './event-bus';
+import { type EventSocket } from './event-socket';
+import { Path } from './path';
 
 interface RouteResult {
   fs: IFileSystem;

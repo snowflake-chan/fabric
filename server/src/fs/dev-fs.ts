@@ -10,10 +10,10 @@
  *   vfs.mount('/dev', dev);
  */
 
-import { type IFileSystem, type FileStat } from './FileSystem';
-import type { EventBus } from './EventBus';
-import { EventSocket } from './EventSocket';
-import { Path } from './Path';
+import { type IFileSystem, type FileStat } from './file-system';
+import type { EventBus } from './event-bus';
+import { EventSocket } from './event-socket';
+import { Path } from './path';
 
 // ---- VirtualDevice（与之前一致）--------------------------------------------
 

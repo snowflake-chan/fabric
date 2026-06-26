@@ -10,9 +10,9 @@
  *   console.error — 错误信息（✗）
  */
 
-import { createShell, type Cout } from './Shell';
-import { type IFileSystem } from '../fs/FileSystem';
-import { type FabricVFS } from '../fs/FabricVFS';
+import { createShell, type Cout } from './shell';
+import { type IFileSystem } from '../fs/file-system';
+import { type FabricVFS } from '../fs/fabric-vfs';
 
 // ---- CLI 工厂 ---------------------------------------------------------------
 

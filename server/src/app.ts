@@ -1,10 +1,10 @@
-import { FabricFS } from '@src/fs/FileSystem';
-import { RootFS } from '@src/fs/RootFS';
-import { FabricVFS } from '@src/fs/FabricVFS';
-import { DevFS } from '@src/fs/DevFS';
-import { createCLI } from '@src/shell/Cli';
-import { rateLimit } from '@src/fs/RateLimiter';
-import { createTtyBridge } from '@src/shell/TtyBridge';
+import { FabricFS } from '@src/fs/file-system';
+import { RootFS } from '@src/fs/root-fs';
+import { FabricVFS } from '@src/fs/fabric-vfs';
+import { DevFS } from '@src/fs/dev-fs';
+import { createCLI } from '@src/shell/cli';
+import { rateLimit } from '@src/fs/rate-limiter';
+import { createTtyBridge } from '@src/shell/tty-bridge';
 
 console.clear();
 

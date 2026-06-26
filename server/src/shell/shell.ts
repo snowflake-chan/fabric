@@ -5,9 +5,9 @@
  * 所有命令 handler 在 commands.ts 中统一管理。
  */
 
-import { type IFileSystem } from '../fs/FileSystem';
-import { type FabricVFS } from '../fs/FabricVFS';
-import { Path } from '../fs/Path';
+import { type IFileSystem } from '../fs/file-system';
+import { type FabricVFS } from '../fs/fabric-vfs';
+import { Path } from '../fs/path';
 import { type Cout, createHandlers, setAllHandlers } from './commands';
 
 export type { Cout };

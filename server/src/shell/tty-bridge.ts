@@ -10,7 +10,7 @@
  *   下一行直接喂给它；否则正常执行命令。
  */
 
-import { type createShell, type Cout } from './Shell';
+import { type createShell, type Cout } from './shell';
 
 type Shell = ReturnType<typeof createShell>;
 

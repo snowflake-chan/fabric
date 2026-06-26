@@ -17,7 +17,7 @@
  *   sock cat /run/events/chat
  */
 
-import type { EventBus } from './EventBus';
+import type { EventBus } from './event-bus';
 
 export class EventSocket {
   private buffer: string[] = [];

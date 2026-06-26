@@ -5,9 +5,9 @@
  * Shell.ts 不再直接定义 handler，改为调用 createHandlers。
  */
 
-import { type IFileSystem } from '../fs/FileSystem';
-import { type FabricVFS } from '../fs/FabricVFS';
-import { Path } from '../fs/Path';
+import { type IFileSystem } from '../fs/file-system';
+import { type FabricVFS } from '../fs/fabric-vfs';
+import { Path } from '../fs/path';
 import { edHandler } from './ed';
 
 // ---- 类型 ------------------------------------------------------------------

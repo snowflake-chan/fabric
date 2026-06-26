@@ -18,12 +18,12 @@
  *   wq      保存并退出
  */
 
-import { Path } from '../fs/Path';
+import { Path } from '../fs/path';
 
 type Cout = (line: string) => Promise<void>;
 type ShellHandler = (cout: Cout, ...args: string[]) => Promise<void>;
 
-import { type IFileSystem } from '../fs/FileSystem';
+import { type IFileSystem } from '../fs/file-system';
 
 interface EdEnv {
   fs: IFileSystem;

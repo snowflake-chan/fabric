@@ -1,4 +1,4 @@
-import { TtyUI } from '@src/tty/TtyUI';
+import { TtyUI } from '@src/tty/tty-ui';
 
 // 启动 TTY 终端（延迟一帧确保 RemoteChannel 就绪）
 setTimeout(() => {
