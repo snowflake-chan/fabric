@@ -18,10 +18,14 @@ const db = rateLimit(storage.getDataStorage('fabric_fs'), {
 const vfs = new FabricVFS();
 vfs.mount('/', new RootFS(new FabricFS(db)));
 
-// 挂载虚拟设备到 /dev
+// 挂载设备到 /dev
 const devFs = new DevFS(vfs.bus);
+vfs.mount('/dev', devFs);
 
-devFs.registerDevice('/box/say', {
+// 挂载 Box3 API 到 /sys
+const sysFs = new DevFS(vfs.bus);
+
+sysFs.registerDevice('/say', {
   stat: () => ({
     type: 'file',
     mode: 0o666,
@@ -39,7 +43,7 @@ devFs.registerDevice('/box/say', {
   },
 });
 
-devFs.registerDevice('/box/players', {
+sysFs.registerDevice('/players', {
   stat: () => ({
     type: 'file',
     mode: 0o666,
@@ -62,8 +66,8 @@ devFs.registerDevice('/box/players', {
   writeFile: () => {},
 });
 
-const playerJoinSock = devFs.registerSocket('/box/player-join');
-vfs.mount('/dev', devFs);
+const playerJoinSock = sysFs.registerSocket('/player-join');
+vfs.mount('/sys', sysFs);
 
 world.onPlayerJoin(({ entity }) => {
   playerJoinSock.push(`${entity.player.userId}\t${entity.player.name}`);

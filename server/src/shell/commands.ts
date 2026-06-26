@@ -8,6 +8,7 @@
 import { type IFileSystem } from '../fs/FileSystem';
 import { type FabricVFS } from '../fs/FabricVFS';
 import { Path } from '../fs/Path';
+import { edHandler } from './ed';
 
 // ---- 类型 ------------------------------------------------------------------
 
@@ -31,6 +32,8 @@ export interface CmdEnv {
   mountStorage?: (path: string, storageId: string) => Promise<void>;
   /** 游戏引擎 tick（每帧执行） */
   worldOnTick?: (cb: () => void) => void;
+  /** 交互式输入（ed 等命令使用） */
+  inputLine?: () => Promise<string> | undefined;
 }
 
 // ---- 工厂 ------------------------------------------------------------------
@@ -46,6 +49,7 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
     getHandler,
     mountStorage,
     worldOnTick,
+    inputLine,
   } = env;
   const cwd = () => cwdRef.value;
   const pipeInput = () => pipeInputRef.value;
@@ -463,6 +467,8 @@ export function createHandlers(env: CmdEnv): Record<string, ShellHandler> {
           await cout(lines[i]);
       }
     },
+
+    ed: edHandler({ fs, cwd, inputLine }),
   };
 }
 

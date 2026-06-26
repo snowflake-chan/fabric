@@ -182,16 +182,22 @@ export function createShell(
     getHandler: (n) => handlers[n],
     mountStorage,
     worldOnTick,
+    inputLine: () => currentInputLine?.(),
   });
   setAllHandlers(handlers);
+
+  /** 交互输入（由 TtyBridge 在每次 exec 前设置） */
+  let currentInputLine: (() => Promise<string>) | undefined;
 
   // ---- exec ----------------------------------------------------------------
 
   async function exec(
     input: string,
     cout: Cout,
-    depth = 0
+    depth = 0,
+    inputLine?: () => Promise<string>
   ): Promise<ShellResult> {
+    currentInputLine = inputLine;
     const trimmed = input.trim();
     if (!trimmed) return { ok: true };
 

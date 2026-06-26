@@ -241,7 +241,7 @@ export class TtyUI {
   private executeCommand(cmd: string): void {
     this.inputBusy = true;
 
-    // 清屏 — 清除本地行缓冲区
+    // 清屏
     if (cmd.trim() === 'clear') {
       this.lines = [];
       this.textDisplay.textContent = '';
