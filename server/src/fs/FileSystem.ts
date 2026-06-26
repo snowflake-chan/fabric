@@ -97,6 +97,8 @@ export interface IFileSystem {
 
 export class FabricFS {
   private metaCache: FSMeta | null = null;
+  private inodeCache = new Map<number, INode>();
+  private dirCache = new Map<number, DirEntry[]>();
 
   /**
    * @param storage 用户传入的 GameDataStorage 实例，例如：
@@ -139,6 +141,8 @@ export class FabricFS {
       rootInode as unknown as JSONValue
     );
     await this.storage.set(K_DIR(ROOT_INODE), [] as JSONValue);
+    this.inodeCache.set(ROOT_INODE, rootInode);
+    this.dirCache.set(ROOT_INODE, []);
 
     this.metaCache = meta;
   }
@@ -183,6 +187,8 @@ export class FabricFS {
   /** 释放 inode：清理 KV 条目并回收编号 */
   async freeInode(id: number): Promise<void> {
     // 清理 inode 数据
+    this.inodeCache.delete(id);
+    this.dirCache.delete(id);
     try {
       await this.storage.remove(K_INODE(id));
     } catch {
@@ -201,29 +207,40 @@ export class FabricFS {
 
   /** 快捷读取 inode */
   async getINode(id: number): Promise<INode> {
+    const cached = this.inodeCache.get(id);
+    if (cached) return cached;
     const raw = await this.storage.get(K_INODE(id));
     if (!raw) throw new Error('FabricFS internal: inode not found');
-    return raw.value as unknown as INode;
+    const inode = raw.value as unknown as INode;
+    this.inodeCache.set(id, inode);
+    return inode;
   }
 
   /** 快捷写入 inode */
   async setINode(id: number, inode: INode): Promise<void> {
     await this.storage.set(K_INODE(id), inode as unknown as JSONValue);
+    this.inodeCache.set(id, inode);
   }
 
   /** 快捷读取目录条目 */
   async getDirEntries(id: number): Promise<DirEntry[]> {
+    const cached = this.dirCache.get(id);
+    if (cached) return cached;
     const raw = await this.storage.get(K_DIR(id));
-    return raw ? (raw.value as unknown as DirEntry[]) : [];
+    const entries = raw ? (raw.value as unknown as DirEntry[]) : [];
+    this.dirCache.set(id, entries);
+    return entries;
   }
 
   /** 写入目录条目 */
   async setDirEntries(id: number, entries: DirEntry[]): Promise<void> {
     await this.storage.set(K_DIR(id), entries as unknown as JSONValue);
+    this.dirCache.set(id, entries);
   }
 
   /** 删除目录条目 KV 键 */
   async removeDirEntries(id: number): Promise<void> {
+    this.dirCache.delete(id);
     await this.storage.remove(K_DIR(id));
   }
 
@@ -238,6 +255,8 @@ export class FabricFS {
         : [];
       return updater(cur) as unknown as JSONValue;
     });
+    // CAS 后无法知道结果，清除缓存
+    this.dirCache.delete(id);
   }
 
   // ---- 分块读写工具 -------------------------------------------------------

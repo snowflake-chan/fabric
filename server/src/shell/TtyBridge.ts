@@ -64,10 +64,11 @@ export function createTtyBridge(shell: Shell): void {
     }
     flushBatch();
 
-    // 最终结果
+    // 最终结果（附带当前目录，客户端用于提示符）
     remoteChannel.sendClientEvent(entity, {
       type: 'tty-result',
       result,
+      cwd: shell.cwd(),
     });
   });
 

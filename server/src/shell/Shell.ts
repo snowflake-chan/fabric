@@ -140,6 +140,34 @@ function parseLogical(
   return result;
 }
 
+/**
+ * 按 | 切分管道命令，识别引号内的 | 不做切分。
+ * "ls / | cat" → ["ls /", "cat"]
+ */
+function parsePipe(s: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inQuote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQuote) {
+      if (c === inQuote) inQuote = null;
+      current += c;
+    } else if (c === '"' || c === "'") {
+      inQuote = c;
+      current += c;
+    } else if (c === '|' && s[i + 1] !== '|') {
+      // 单个 |（非 ||）→ 管道
+      parts.push(current);
+      current = '';
+    } else {
+      current += c;
+    }
+  }
+  parts.push(current);
+  return parts.filter((p) => p.trim().length > 0);
+}
+
 // ---- 流式 tree（逐行 emit）---------------------------------------------------
 
 async function streamTree(
@@ -186,20 +214,38 @@ export function createShell(fs: IFileSystem) {
   const MAX_HISTORY = 100;
   /** 循环变量作用域 */
   const vars = new Map<string, string>();
+  /** 管道输入 — 上一个命令的输出 / < 文件内容 */
+  let pipeInput: string | null = null;
 
   const handlers: Record<string, ShellHandler> = {
     async ls(cout, path) {
       const target = resolvePath(cwd, path || '.');
+      const st = await fs.stat(target);
+      if (st === null) throw new Error(`ENOENT: ${target}`);
+      if (st.type === 'file') {
+        // ls 单个文件 → 输出文件名
+        await cout(target.split('/').pop()!);
+        return;
+      }
+      // 目录 → 列出条目
       const entries = await fs.readdir(target);
       for (const name of entries) {
-        const st = await fs.stat(
+        const childSt = await fs.stat(
           target === '/' ? `/${name}` : `${target}/${name}`
         );
-        await cout(st?.type === 'dir' ? `${name}/` : name);
+        await cout(childSt?.type === 'dir' ? `${name}/` : name);
       }
     },
 
     async cat(cout, path) {
+      // 管道输入：cat 不带参数时输出管道内容
+      if (!path && pipeInput !== null) {
+        const lines = pipeInput.split('\n');
+        for (const line of lines) {
+          await cout(line);
+        }
+        return;
+      }
       const target = resolvePath(cwd, path);
       const content = await fs.readFile(target);
       if (content === null) throw new Error(`ENOENT: ${target}`);
@@ -309,15 +355,14 @@ export function createShell(fs: IFileSystem) {
       await streamTree(fs, target, '', cout);
     },
 
-    async cd(cout, path) {
+    async cd(_cout, path) {
+      if (path === undefined) return;
       const target = resolvePath(cwd, path);
       const st = await fs.stat(target);
       if (st === null) throw new Error(`ENOENT: ${target}`);
       if (st.type !== 'dir')
         throw new Error(`ENOTDIR: ${target} is not a directory`);
-      const prev = cwd;
       cwd = target;
-      await cout(`${prev} → ${cwd}`);
     },
 
     async pwd(cout) {
@@ -334,6 +379,12 @@ export function createShell(fs: IFileSystem) {
       // 清屏由客户端处理（TtyUI 检测到 clear 命令后清除本地行）
     },
 
+    async sleep(cout, seconds) {
+      const sec = parseFloat(seconds);
+      if (isNaN(sec) || sec < 0) throw new Error('Usage: sleep <seconds>');
+      await new Promise((r) => setTimeout(r, sec * 1000));
+    },
+
     async help(cout) {
       const names = Object.keys(handlers).sort();
       for (const name of names) {
@@ -345,6 +396,55 @@ export function createShell(fs: IFileSystem) {
       for (let i = 0; i < history.length; i++) {
         await cout(`${i + 1}  ${history[i]}`);
       }
+    },
+
+    async test(cout, ...args) {
+      if (args.length === 0) throw new Error('test: missing operand');
+
+      const op = args[0];
+      // File tests
+      if (op === '-f' || op === '-d' || op === '-e') {
+        const target = resolvePath(cwd, args[1]);
+        const st = await fs.stat(target);
+        if (op === '-e' && st === null) throw new Error('false');
+        if (op === '-f' && (st === null || st.type !== 'file'))
+          throw new Error('false');
+        if (op === '-d' && (st === null || st.type !== 'dir'))
+          throw new Error('false');
+        return;
+      }
+      // String length
+      if (op === '-n') {
+        if (!args[1]) throw new Error('false');
+        return;
+      }
+      if (op === '-z') {
+        if (args[1]) throw new Error('false');
+        return;
+      }
+      // String comparison
+      if (args.length === 3 && args[1] === '=') {
+        if (args[0] !== args[2]) throw new Error('false');
+        return;
+      }
+      if (args.length === 3 && args[1] === '!=') {
+        if (args[0] === args[2]) throw new Error('false');
+        return;
+      }
+      // Single string: non-empty → true
+      if (args.length === 1) {
+        if (!args[0]) throw new Error('false');
+        return;
+      }
+      throw new Error(`test: unknown operator '${op}'`);
+    },
+
+    ['[']: async (cout, ...args) => {
+      if (args.length < 1 || args[args.length - 1] !== ']') {
+        throw new Error('[: missing ]');
+      }
+      // Strip trailing ], delegate to test
+      await handlers.test(cout, ...args.slice(0, -1));
     },
 
     ['true']: async () => {
@@ -441,6 +541,13 @@ export function createShell(fs: IFileSystem) {
       return execScriptLines([expanded], 0, 1, cout, depth);
     }
 
+    // 命令替换 $(...)
+    if (expanded.includes('$(')) {
+      // eslint-disable-next-line no-use-before-define
+      const subResult = await expandSubstitutions(expanded, cout, depth);
+      if (subResult !== null) return exec(subResult, cout, depth);
+    }
+
     // 分号分隔的多命令序列
     const cmds = splitSemicolon(trimmed);
     if (cmds.length > 1) {
@@ -466,6 +573,27 @@ export function createShell(fs: IFileSystem) {
       return result;
     }
 
+    // | 管道
+    const pipeCmds = parsePipe(trimmed);
+    if (pipeCmds.length > 1) {
+      let prevOutput: string | null = null;
+      for (let i = 0; i < pipeCmds.length; i++) {
+        const captured: string[] = [];
+        const pc: Cout =
+          i < pipeCmds.length - 1
+            ? async (line: string) => {
+                captured.push(line);
+              }
+            : cout;
+        pipeInput = prevOutput;
+        const r = await exec(pipeCmds[i].trim(), pc, depth + 1);
+        if (!r.ok) return r;
+        prevOutput = captured.join('\n');
+      }
+      pipeInput = null;
+      return { ok: true };
+    }
+
     // 变量展开（for 循环等设置）
     let expandedLine = trimmed;
     if (vars.size > 0) {
@@ -478,14 +606,32 @@ export function createShell(fs: IFileSystem) {
     const cmdName = tokens[0]?.toLowerCase();
     const cmdArgs = tokens.slice(1);
 
+    // ---- < 输入重定向（文件内容 → pipeInput）----
+    const inRedirIdx = cmdArgs.indexOf('<');
+    let runArgs = cmdArgs;
+    if (inRedirIdx !== -1) {
+      const rawPath = cmdArgs[inRedirIdx + 1];
+      if (!rawPath || rawPath.startsWith('-')) {
+        return { ok: false, error: 'syntax error: < without target' };
+      }
+      const target = resolvePath(cwd, rawPath);
+      const content = await fs.readFile(target);
+      if (content === null) {
+        return { ok: false, error: `ENOENT: ${target}` };
+      }
+      pipeInput = content;
+      runArgs = cmdArgs
+        .slice(0, inRedirIdx)
+        .concat(cmdArgs.slice(inRedirIdx + 2));
+    }
+
     // ---- > / >> 重定向（所有命令通用）----
-    const redirIdx = cmdArgs.indexOf('>>');
-    const redirSglIdx = redirIdx !== -1 ? -1 : cmdArgs.indexOf('>');
+    const redirIdx = runArgs.indexOf('>>');
+    const redirSglIdx = redirIdx !== -1 ? -1 : runArgs.indexOf('>');
     const hasRedirect = redirIdx !== -1 || redirSglIdx !== -1;
     let runCout = cout;
     let redirectTarget: string | null = null;
     const redirectAppend = redirIdx !== -1;
-    let runArgs = cmdArgs;
     const captured: string[] = [];
 
     async function writeRedirect(): Promise<void> {
@@ -497,17 +643,16 @@ export function createShell(fs: IFileSystem) {
       } else {
         await fs.writeFile(redirectTarget, content);
       }
-      await cout(`→ written ${redirectTarget}`);
     }
 
     if (hasRedirect) {
       const idx = redirectAppend ? redirIdx : redirSglIdx;
-      const rawPath = cmdArgs[idx + 1];
+      const rawPath = runArgs[idx + 1];
       if (!rawPath || rawPath.startsWith('-')) {
         return { ok: false, error: 'syntax error: redirect without target' };
       }
       redirectTarget = resolvePath(cwd, rawPath);
-      runArgs = cmdArgs.slice(0, idx).concat(cmdArgs.slice(idx + 2));
+      runArgs = runArgs.slice(0, idx).concat(runArgs.slice(idx + 2));
       runCout = async (line: string) => {
         captured.push(line);
       };
@@ -539,6 +684,52 @@ export function createShell(fs: IFileSystem) {
       const msg = err instanceof Error ? err.message : String(err);
       return { ok: false, error: msg };
     }
+  }
+
+  /**
+   * 展开 $(...) 命令替换。
+   * 执行内部命令并捕获输出，替换掉 $(...) 占位。
+   * 返回 null 表示没有需要展开的替换。
+   */
+  async function expandSubstitutions(
+    s: string,
+    cout: Cout,
+    depth: number
+  ): Promise<string | null> {
+    let result = '';
+    let i = 0;
+    while (i < s.length) {
+      const start = s.indexOf('$(', i);
+      if (start === -1) {
+        result += s.slice(i);
+        break;
+      }
+      result += s.slice(i, start);
+
+      // 找匹配的右括号（追踪嵌套深度）
+      let parenDepth = 1;
+      let j = start + 2;
+      while (j < s.length && parenDepth > 0) {
+        if (s[j] === '(') parenDepth++;
+        else if (s[j] === ')') parenDepth--;
+        if (parenDepth > 0) j++;
+      }
+      if (parenDepth !== 0) {
+        result += s.slice(start);
+        break;
+      }
+
+      const inner = s.slice(start + 2, j);
+      const captured: string[] = [];
+      const captureCout: Cout = async (line: string) => {
+        captured.push(line);
+      };
+      const r = await exec(inner.trim(), captureCout, depth + 1);
+      if (!r.ok) return null;
+      result += captured.join('\n');
+      i = j + 1;
+    }
+    return result !== s ? result : null;
   }
 
   // ── 脚本块执行（支持 if / else / end）------------------------------------
@@ -774,5 +965,5 @@ export function createShell(fs: IFileSystem) {
     return { ok: true };
   }
 
-  return { exec, history: history as readonly string[] };
+  return { exec, history: history as readonly string[], cwd: () => cwd };
 }

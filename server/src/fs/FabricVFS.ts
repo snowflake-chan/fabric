@@ -11,25 +11,127 @@
  * 不直接感知底层存储实现。
  */
 
-import {
-  type IFileSystem,
-  type FileStat,
-  type INode,
-  type DirEntry,
-} from './FileSystem';
+import { type IFileSystem, type FileStat, type INode } from './FileSystem';
 import type { FabricFS } from './FileSystem';
 import { CHUNK_SIZE } from './FileSystem';
 
-// ---- 虚拟路径常量 ----------------------------------------------------------
+// ---- 虚拟设备注册接口 ------------------------------------------------------
 
-const VIRTUAL_DIRS = new Set(['/dev']);
-const DEV_NULL = '/dev/null';
-const VIRTUAL_DEVICES = new Set([DEV_NULL]);
+/**
+ * 虚拟设备/文件的处理器。
+ * 实现其中一部分方法，FabricVFS 会自动处理其余操作的默认行为（EROFS、ENOENT 等）。
+ */
+export interface VirtualDevice {
+  /** 返回 stat 信息，默认返回 type=file mode=0o444 size=0 */
+  stat?: () => FileStat | Promise<FileStat>;
+  /** 读取文件内容，默认返回 null（ENOENT） */
+  readFile?: () => string | null | Promise<string | null>;
+  /** 写入文件内容，默认抛 EROFS */
+  writeFile?: (data: string) => void | Promise<void>;
+  /** 列出目录内容，仅对虚拟目录有效 */
+  readdir?: () => string[] | Promise<string[]>;
+  /** 挂载的子设备（仅对目录有效） */
+  children?: Record<string, VirtualDevice>;
+}
 
 // ---- FabricVFS ------------------------------------------------------------
 
 export class FabricVFS implements IFileSystem {
+  /** 已注册的虚拟设备表 */
+  private devices = new Map<string, VirtualDevice>();
+
   constructor(private fs: FabricFS) {}
+
+  /**
+   * 注册一个虚拟设备/文件。
+   * path 必须以 /dev/ 开头，例如 registerDevice('/dev/zero', handler)。
+   */
+  registerDevice(path: string, handler: VirtualDevice): void {
+    this.devices.set(path, handler);
+    // 确保父目录存在：/dev/foo → /dev 自动建
+    const parent = path.substring(0, path.lastIndexOf('/'));
+    if (parent && parent !== path) {
+      if (!this.devices.has(parent)) {
+        this.devices.set(parent, {
+          stat: () => ({
+            type: 'dir',
+            mode: 0o555,
+            size: 0,
+            uid: 0,
+            gid: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+            nlinks: 2,
+          }),
+          readdir: () => {
+            const kids: string[] = [];
+            for (const k of this.devices.keys()) {
+              if (k.startsWith(`${parent}/`) && k !== parent) {
+                const name = k.substring(parent.length + 1);
+                if (!name.includes('/')) kids.push(name);
+              }
+            }
+            return kids;
+          },
+        });
+      }
+    }
+  }
+
+  /** 查找虚拟设备（精确匹配，再尝试父目录） */
+  private getDevice(path: string): VirtualDevice | undefined {
+    return this.devices.get(path);
+  }
+
+  // ------------------------------------------------------------------
+  //  内置设备注册
+  // ------------------------------------------------------------------
+
+  /** 注册内置虚拟设备（/dev/null 等） */
+  private registerBuiltin(): void {
+    this.registerDevice('/dev', {
+      readdir: () => {
+        const kids: string[] = [];
+        for (const k of this.devices.keys()) {
+          if (k.startsWith('/dev/') && k !== '/dev') {
+            const name = k.substring(5);
+            if (!name.includes('/')) kids.push(name);
+          }
+        }
+        return kids;
+      },
+      stat: () => ({
+        type: 'dir',
+        mode: 0o555,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        nlinks: 2,
+      }),
+    });
+
+    this.registerDevice('/dev/null', {
+      stat: () => ({
+        type: 'file',
+        mode: 0o666,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        nlinks: 1,
+      }),
+      readFile: () => '',
+      writeFile: () => {
+        /* 静默丢弃 */
+      },
+    });
+  }
 
   // ------------------------------------------------------------------
   //  初始化
@@ -37,6 +139,7 @@ export class FabricVFS implements IFileSystem {
 
   async init(): Promise<void> {
     await this.fs.init();
+    this.registerBuiltin();
   }
 
   // ------------------------------------------------------------------
@@ -93,12 +196,22 @@ export class FabricVFS implements IFileSystem {
     return { parentId, name };
   }
 
-  private isVirtual(path: string): boolean {
-    return path === '/dev' || path.startsWith('/dev/');
+  /** 检查路径是虚拟设备 */
+  private isDevicePath(path: string): boolean {
+    for (const k of this.devices.keys()) {
+      if (path === k || path.startsWith(`${k}/`)) return true;
+    }
+    return false;
   }
 
-  private isReadOnly(path: string): boolean {
-    return this.isVirtual(path) && path !== DEV_NULL;
+  /** 虚拟设备不可写时抛 EROFS */
+  private async checkReadonly(path: string): Promise<void> {
+    const dev = this.getDevice(path);
+    if (!dev) return;
+    // 有 writeFile 实现 → 可写；否则只读
+    if (!dev.writeFile) {
+      throw new Error(`EROFS: cannot modify '${path}': read-only`);
+    }
   }
 
   // ------------------------------------------------------------------
@@ -106,45 +219,16 @@ export class FabricVFS implements IFileSystem {
   // ------------------------------------------------------------------
 
   async exists(path: string): Promise<boolean> {
-    if (path === '/dev' || VIRTUAL_DEVICES.has(path)) return true;
-    if (this.isVirtual(path)) return false;
+    if (this.getDevice(path)) return true;
+    if (this.isDevicePath(path)) return false;
     return (await this.resolve(path)) !== null;
   }
 
   async stat(path: string): Promise<FileStat | null> {
-    // /dev 目录
-    if (path === '/dev') {
-      return {
-        type: 'dir',
-        mode: 0o555,
-        size: 0,
-        uid: 0,
-        gid: 0,
-        atime: 0,
-        mtime: 0,
-        ctime: 0,
-        nlinks: 2,
-      };
-    }
+    const dev = this.getDevice(path);
+    if (dev?.stat) return await dev.stat();
+    if (this.isDevicePath(path)) return null;
 
-    // /dev/null
-    if (path === DEV_NULL) {
-      return {
-        type: 'file',
-        mode: 0o666,
-        size: 0,
-        uid: 0,
-        gid: 0,
-        atime: 0,
-        mtime: 0,
-        ctime: 0,
-        nlinks: 1,
-      };
-    }
-
-    if (this.isVirtual(path)) return null;
-
-    // 真实路径
     const id = await this.resolve(path);
     if (id === null) return null;
     const inode = await this.fs.getINode(id);
@@ -162,9 +246,7 @@ export class FabricVFS implements IFileSystem {
   }
 
   async chmod(path: string, mode: number): Promise<void> {
-    if (this.isVirtual(path)) {
-      throw new Error(`EROFS: cannot modify '${path}': read-only`);
-    }
+    await this.checkReadonly(path);
     const id = await this.resolve(path);
     if (id === null) throw new Error(`ENOENT: ${path} not found`);
 
@@ -175,8 +257,9 @@ export class FabricVFS implements IFileSystem {
   }
 
   async readFile(path: string): Promise<string | null> {
-    if (path === DEV_NULL) return '';
-    if (this.isVirtual(path)) return null;
+    const dev = this.getDevice(path);
+    if (dev?.readFile) return await dev.readFile();
+    if (this.isDevicePath(path)) return null;
 
     const id = await this.resolve(path);
     if (id === null) return null;
@@ -198,9 +281,12 @@ export class FabricVFS implements IFileSystem {
   }
 
   async writeFile(path: string, data: string): Promise<void> {
-    // /dev/null 静默丢弃
-    if (path === DEV_NULL) return;
-    if (this.isVirtual(path)) {
+    const dev = this.getDevice(path);
+    if (dev?.writeFile) {
+      await dev.writeFile(data);
+      return;
+    }
+    if (this.isDevicePath(path)) {
       throw new Error(`EROFS: cannot write '${path}': read-only`);
     }
 
@@ -291,9 +377,7 @@ export class FabricVFS implements IFileSystem {
   }
 
   async mkdir(path: string): Promise<void> {
-    if (this.isVirtual(path)) {
-      throw new Error(`EROFS: cannot create '${path}': read-only`);
-    }
+    await this.checkReadonly(path);
     const { parentId, name } = await this.resolveParent(path);
 
     // 检查是否已存在
@@ -325,11 +409,9 @@ export class FabricVFS implements IFileSystem {
   }
 
   async readdir(path: string): Promise<string[]> {
-    // /dev 目录
-    if (path === '/dev') {
-      return ['null'];
-    }
-    if (this.isVirtual(path)) {
+    const dev = this.getDevice(path);
+    if (dev?.readdir) return await dev.readdir();
+    if (this.isDevicePath(path)) {
       throw new Error(`ENOTDIR: ${path} is not a directory`);
     }
 
@@ -346,9 +428,7 @@ export class FabricVFS implements IFileSystem {
   }
 
   async unlink(path: string): Promise<void> {
-    if (this.isVirtual(path)) {
-      throw new Error(`EROFS: cannot unlink '${path}': read-only`);
-    }
+    await this.checkReadonly(path);
     const { parentId, name } = await this.resolveParent(path);
 
     // 先 look up 文件 inode ID，以便后续清理分块
@@ -378,9 +458,7 @@ export class FabricVFS implements IFileSystem {
   }
 
   async rmdir(path: string): Promise<void> {
-    if (this.isVirtual(path)) {
-      throw new Error(`EROFS: cannot rmdir '${path}': read-only`);
-    }
+    await this.checkReadonly(path);
     const id = await this.resolve(path);
     if (id === null) throw new Error(`ENOENT: ${path} not found`);
 
@@ -411,9 +489,7 @@ export class FabricVFS implements IFileSystem {
   }
 
   async rimraf(path: string): Promise<void> {
-    if (this.isVirtual(path)) {
-      throw new Error(`EROFS: cannot remove '${path}': read-only`);
-    }
+    await this.checkReadonly(path);
     if (path === '/') return; // 根目录不可删除
 
     const id = await this.resolve(path);
@@ -459,9 +535,8 @@ export class FabricVFS implements IFileSystem {
   }
 
   async rename(oldPath: string, newPath: string): Promise<void> {
-    if (this.isVirtual(oldPath) || this.isVirtual(newPath)) {
-      throw new Error('EROFS: cannot rename virtual paths');
-    }
+    await this.checkReadonly(oldPath);
+    await this.checkReadonly(newPath);
 
     const srcId = await this.resolve(oldPath);
     if (srcId === null) throw new Error(`ENOENT: ${oldPath} not found`);

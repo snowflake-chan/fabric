@@ -5,19 +5,14 @@
  *   基于 ClientUI 构建一个终端风格的 TTY 界面，
  *   通过 RemoteChannel 与服务端的 DebugShell 通信。
  *
- * 协议：
- *   客户端 → 服务端  { type: "tty-cmd", cmd: "..." }
- *   服务端 → 客户端  { type: "tty-result", result: ShellResult }
- *
- * 布局：
+ * 布局（单 UiText 富文本方案）：
  *   UiScreen
  *     └─ UiBox (全屏黑底)
- *         ├─ UiScrollBox + UiText 行 (输出区, ~85% 高度)
+ *         ├─ UiScrollBox + UiText (richText=true)  (输出区)
  *         └─ UiBox + UiInput (底栏)
  *
- * 注意：
- *   Client API 将 anchor/position/size/color 声明为 readonly，
- *   需通过返回对象的可变属性（.x/.y/.r/.g/.b）修改，不可重新赋值。
+ * 相比逐行创建 UiText，现在用单个 UiText 的 richText 模式，
+ * 用 <font color="#RRGGBB"> 标签标记颜色，大幅减少 UI 节点数。
  */
 
 // ---- 类型 -------------------------------------------------------------------
@@ -26,6 +21,11 @@ interface TreeNode {
   name: string;
   type: 'file' | 'dir';
   children?: TreeNode[];
+}
+
+interface LineEntry {
+  text: string;
+  color: Vec3;
 }
 
 // ---- 工具函数（绕过 readonly 声明）------------------------------------------
@@ -52,6 +52,19 @@ function setColor(
   target.b = b;
 }
 
+/** Vec3 → #RRGGBB 字符串 */
+function vec3ToHex(color: Vec3): string {
+  const r = Math.round(color.r).toString(16).padStart(2, '0');
+  const g = Math.round(color.g).toString(16).padStart(2, '0');
+  const b = Math.round(color.b).toString(16).padStart(2, '0');
+  return `${r}${g}${b}`;
+}
+
+/** XML 转义，防止富文本标签冲突 */
+function escapeXml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // ---- 终端颜色 ---------------------------------------------------------------
 
 const COLOR_PROMPT = Vec3.create({ r: 0, g: 220, b: 80 });
@@ -64,16 +77,19 @@ const COLOR_DIM = Vec3.create({ r: 100, g: 100, b: 100 });
 
 export class TtyUI {
   private scrollBox!: UiScrollBox;
-  /** 内容容器 — 撑开 scrollbox 的内容高度以启用滚动 */
-  private scrollContent!: UiBox;
+  /** 单个富文本元素 — 替代原来成百上千个 UiText */
+  private textDisplay!: UiText;
   private inputField!: UiInput;
+  /** 底部路径提示 */
+  private pathLabel!: UiText;
   private bg!: UiBox;
   private inputBg!: UiBox;
-  private lines: UiText[] = [];
+  /** 行缓冲区（内存中，不含富文本标记） */
+  private lines: LineEntry[] = [];
+  /** 当前目录（从服务端同步） */
+  private cwd = '/';
 
-  private readonly LINE_HEIGHT = 20;
   private readonly MAX_LINES = 500;
-  private scrollBoxHeight = 0;
   private inputBusy = false;
 
   constructor() {
@@ -86,7 +102,6 @@ export class TtyUI {
     setTimeout(() => this.inputField.focus(), 200);
 
     screen.events.on('resize', (e) => {
-      this.scrollBoxHeight = e.screenHeight - 82;
       this.inputBg.position.offset.y = e.screenHeight - 32;
     });
   }
@@ -94,9 +109,7 @@ export class TtyUI {
   // ---- UI 构建 ---------------------------------------------------------------
 
   private buildUI(): void {
-    this.scrollBoxHeight = screenHeight - 82;
-
-    // 全屏背景 — 直接挂 ui 下（ui 是引擎默认屏幕的根节点，确保在渲染树中）
+    // 全屏背景
     this.bg = UiBox.create();
     this.bg.parent = ui;
     this.bg.anchor.x = 0;
@@ -106,6 +119,7 @@ export class TtyUI {
     this.bg.backgroundOpacity = 0.95;
     this.bg.zIndex = 999;
 
+    // 滚动输出区
     this.scrollBox = UiScrollBox.create();
     this.scrollBox.parent = this.bg;
     this.scrollBox.anchor.x = 0;
@@ -117,16 +131,24 @@ export class TtyUI {
     this.scrollBox.zIndex = 1000;
     this.scrollBox.pointerEventBehavior = PointerEventBehavior.ENABLE;
 
-    // 内容容器 — 撑开 scrollbox 的可滚动范围
-    this.scrollContent = UiBox.create();
-    this.scrollContent.parent = this.scrollBox;
-    this.scrollContent.anchor.x = 0;
-    this.scrollContent.anchor.y = 0;
-    setCoord2(this.scrollContent.position, { x: 0, y: 0 }, { x: 0, y: 0 });
-    setCoord2(this.scrollContent.size, { x: 0, y: 0 }, { x: 1, y: 0 });
-    this.scrollContent.backgroundOpacity = 0;
+    // 单个富文本元素作为输出区内容
+    this.textDisplay = UiText.create();
+    this.textDisplay.parent = this.scrollBox;
+    this.textDisplay.richText = true;
+    this.textDisplay.autoWordWrap = true;
+    this.textDisplay.textXAlignment = 'Left';
+    this.textDisplay.textYAlignment = 'Top';
+    this.textDisplay.textFontFamily = UITextFontFamily.CodeNewRomanBold;
+    this.textDisplay.textFontSize = 14;
+    this.textDisplay.pointerEventBehavior =
+      PointerEventBehavior.DISABLE_AND_BLOCK_PASS_THROUGH;
+    this.textDisplay.anchor.x = 0;
+    this.textDisplay.anchor.y = 0;
+    setCoord2(this.textDisplay.position, { x: 8, y: 0 }, { x: 0, y: 0 });
+    setCoord2(this.textDisplay.size, { x: -16, y: 0 }, { x: 1, y: 0 });
+    setColor(this.textDisplay.textColor, 210, 210, 210);
 
-    // 输入栏底条（贴底）
+    // 输入栏底条
     this.inputBg = UiBox.create();
     this.inputBg.parent = this.bg;
     this.inputBg.anchor.x = 0;
@@ -154,13 +176,28 @@ export class TtyUI {
     setColor(sep.backgroundColor, 50, 50, 50);
     sep.backgroundOpacity = 1;
 
-    // 输入框
+    // 底部路径提示
+    this.pathLabel = UiText.create();
+    this.pathLabel.parent = this.inputBg;
+    this.pathLabel.anchor.x = 0;
+    this.pathLabel.anchor.y = 0;
+    setCoord2(this.pathLabel.position, { x: 6, y: 4 }, { x: 0, y: 0 });
+    setCoord2(this.pathLabel.size, { x: 260, y: -8 }, { x: 0, y: 1 });
+    this.pathLabel.textContent = '/$ ';
+    setColor(this.pathLabel.textColor, 0, 220, 80);
+    this.pathLabel.textFontFamily = UITextFontFamily.CodeNewRomanBold;
+    this.pathLabel.textFontSize = 14;
+    this.pathLabel.textXAlignment = 'Left';
+    this.pathLabel.pointerEventBehavior =
+      PointerEventBehavior.DISABLE_AND_BLOCK_PASS_THROUGH;
+
+    // 输入框（在路径提示右侧）
     this.inputField = UiInput.create();
     this.inputField.parent = this.inputBg;
     this.inputField.anchor.x = 0;
     this.inputField.anchor.y = 0;
-    setCoord2(this.inputField.position, { x: 6, y: 4 }, { x: 0, y: 0 });
-    setCoord2(this.inputField.size, { x: -12, y: -8 }, { x: 1, y: 1 });
+    setCoord2(this.inputField.position, { x: 266, y: 4 }, { x: 0, y: 0 });
+    setCoord2(this.inputField.size, { x: -272, y: -8 }, { x: 1, y: 1 });
     this.inputField.placeholder = '输入命令...';
     setColor(this.inputField.textColor, 0, 220, 80);
     setColor(this.inputField.placeholderColor, 170, 170, 170);
@@ -169,6 +206,23 @@ export class TtyUI {
     this.inputField.textXAlignment = 'Left';
     setColor(this.inputField.backgroundColor, 24, 24, 24);
     this.inputField.backgroundOpacity = 0;
+  }
+
+  // ---- 富文本重建 ------------------------------------------------------------
+
+  /** 从 lines[] 重建富文本内容并更新滚动 */
+  private rebuildText(): void {
+    let content = '';
+    for (let i = 0; i < this.lines.length; i++) {
+      if (i > 0) content += '\n';
+      const { text, color } = this.lines[i];
+      const hex = vec3ToHex(color);
+      content += `<font color="#${hex}">${escapeXml(text)}</font>`;
+    }
+    this.textDisplay.textContent = content;
+
+    // 直接滚到底部（scrollbox 根据内容自动撑开）
+    this.scrollBox.scrollPosition.y = 999999;
   }
 
   // ---- 输入处理 --------------------------------------------------------------
@@ -187,13 +241,11 @@ export class TtyUI {
   private executeCommand(cmd: string): void {
     this.inputBusy = true;
 
-    // 清屏 — 直接清除本地行，不发送到服务端
+    // 清屏 — 清除本地行缓冲区
     if (cmd.trim() === 'clear') {
-      for (const line of this.lines) {
-        line.parent = undefined;
-      }
       this.lines = [];
-      this.scrollContent.size.offset.y = 0;
+      this.textDisplay.textContent = '';
+      this.textDisplay.size.offset.y = 0;
       setTimeout(() => {
         this.inputField.focus();
         this.inputBusy = false;
@@ -201,7 +253,7 @@ export class TtyUI {
       return;
     }
 
-    this.appendLine(`$ ${cmd}`, COLOR_PROMPT);
+    this.appendLine(`${this.cwd}$ ${cmd}`, COLOR_PROMPT);
     remoteChannel.sendServerEvent({ type: 'tty-cmd', cmd });
     setTimeout(() => {
       this.inputField.focus();
@@ -215,7 +267,7 @@ export class TtyUI {
     remoteChannel.onClientEvent((args: unknown) => {
       const msg = args as Record<string, unknown>;
 
-      // 流式数据行 — 实时追加（可能含多行）
+      // 流式数据行
       if (msg?.type === 'tty-stream') {
         const lines = String(msg.data).split('\n');
         for (const l of lines) {
@@ -226,6 +278,12 @@ export class TtyUI {
 
       // 完整结果
       if (msg?.type !== 'tty-result') return;
+
+      // 同步当前目录（用于提示符和底部路径）
+      if (typeof msg.cwd === 'string') {
+        this.cwd = msg.cwd;
+        this.pathLabel.textContent = `${this.cwd}$ `;
+      }
 
       const result = msg.result as {
         ok: boolean;
@@ -241,7 +299,7 @@ export class TtyUI {
     });
   }
 
-  // ---- 结果渲染（匹配 Cli.ts 的输出格式）------------------------------------
+  // ---- 结果渲染 --------------------------------------------------------------
 
   private printResult(data: unknown): void {
     if (data === null || data === undefined) return;
@@ -257,21 +315,17 @@ export class TtyUI {
       }
       const first = data[0];
       if (first && typeof first === 'object' && 'isDir' in first) {
-        // ls 结果：{ name, isDir }[] → "name/  name/  file"
         const line = (data as { name: string; isDir: boolean }[])
           .map((e) => (e.isDir ? `${e.name}/` : e.name))
           .join('  ');
         this.appendLine(line, COLOR_OUTPUT);
       } else if (first && typeof first === 'object' && 'children' in first) {
-        // tree 结果：TreeNode[]
         this.printTreeLines(data as TreeNode[], '');
       } else if (typeof first === 'string') {
-        // 普通字符串数组（help → 命令名列表）
         for (const item of data) {
           this.appendLine(String(item), COLOR_OUTPUT);
         }
       } else {
-        // 其他对象数组
         for (const item of data) {
           if (typeof item === 'object' && item !== null) {
             this.appendLine(JSON.stringify(item), COLOR_OUTPUT);
@@ -283,13 +337,10 @@ export class TtyUI {
     } else if (typeof data === 'object') {
       const obj = data as Record<string, unknown>;
       if ('type' in obj && typeof obj.type === 'string') {
-        // stat 结果
         this.printStatLines(obj);
       } else if ('from' in obj && 'to' in obj) {
-        // mv / cd 结果
         this.appendLine(`${String(obj.from)} → ${String(obj.to)}`, COLOR_INFO);
       } else if ('path' in obj && 'text' in obj) {
-        // echo > 结果
         this.appendLine(`→ written ${String(obj.path)}`, COLOR_INFO);
       } else {
         this.appendLine(JSON.stringify(obj, null, 2), COLOR_OUTPUT);
@@ -342,60 +393,14 @@ export class TtyUI {
   // ---- 行管理 ----------------------------------------------------------------
 
   private appendLine(text: string, color: Vec3): void {
-    const idx = this.lines.length;
-    const yPos = idx * this.LINE_HEIGHT;
-
-    const line = UiText.create();
-    line.parent = this.scrollContent;
-    line.textContent = text;
-    line.textFontFamily = UITextFontFamily.CodeNewRomanBold;
-    line.textFontSize = 14;
-    line.textXAlignment = 'Left';
-    line.textYAlignment = 'Top';
-    line.autoWordWrap = true;
-    line.pointerEventBehavior =
-      PointerEventBehavior.DISABLE_AND_BLOCK_PASS_THROUGH;
-
-    // 颜色
-    line.textColor.r = color.r;
-    line.textColor.g = color.g;
-    line.textColor.b = color.b;
-
-    // 位置 & 尺寸（通过 .x/.y 绕过 readonly）
-    line.anchor.x = 0;
-    line.anchor.y = 0;
-    setCoord2(line.position, { x: 8, y: yPos }, { x: 0, y: 0 });
-    setCoord2(line.size, { x: -16, y: this.LINE_HEIGHT }, { x: 1, y: 0 });
-
-    this.lines.push(line);
+    this.lines.push({ text, color });
 
     // 裁剪过旧行
     if (this.lines.length > this.MAX_LINES) {
-      const excess = this.lines.length - this.MAX_LINES;
-      const removed = this.lines.splice(0, excess);
-      for (const r of removed) {
-        r.parent = undefined;
-      }
-      // 重算剩余行的 Y 位置
-      for (let i = 0; i < this.lines.length; i++) {
-        setCoord2(
-          this.lines[i].position,
-          { x: 8, y: i * this.LINE_HEIGHT },
-          { x: 0, y: 0 }
-        );
-      }
+      this.lines.splice(0, this.lines.length - this.MAX_LINES);
     }
 
-    // 更新内容容器高度，撑开 scrollbox 的滚动范围
-    this.scrollContent.size.offset.y = this.lines.length * this.LINE_HEIGHT;
-
-    // 自动滚到底部
-    if (this.lines.length * this.LINE_HEIGHT > this.scrollBoxHeight) {
-      this.scrollBox.scrollPosition.y =
-        this.lines.length * this.LINE_HEIGHT -
-        this.scrollBoxHeight +
-        this.LINE_HEIGHT;
-    }
+    this.rebuildText();
   }
 
   // ---- 公开方法 --------------------------------------------------------------
