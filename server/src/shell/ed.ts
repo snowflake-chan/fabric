@@ -51,7 +51,7 @@ export function edHandler(env: EdEnv): ShellHandler {
 
     let cur = buf.length;
     let modified = false;
-    await cout(buf.length > 0 ? String(buf.length) : '');
+    if (buf.length > 0) await cout(String(buf.length));
 
     while (true) {
       const raw = ((await inputLine()) || '').trim();
@@ -153,7 +153,6 @@ export function edHandler(env: EdEnv): ShellHandler {
         }
         case 'a': {
           const at = addr ? addr.end : cur;
-          await cout('');
           let cnt = 0;
           while (true) {
             if (buf.length >= MAX_BUF) {
@@ -171,7 +170,6 @@ export function edHandler(env: EdEnv): ShellHandler {
         }
         case 'i': {
           const at = addr ? addr.start - 1 : cur - 1;
-          await cout('');
           let cnt = 0;
           while (true) {
             if (buf.length >= MAX_BUF) {

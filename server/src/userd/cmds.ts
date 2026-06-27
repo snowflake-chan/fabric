@@ -274,6 +274,13 @@ export function createUserCommands(
       if (home) {
         cwdRef.value = home;
         vars.set('HOME', home);
+        // 加载用户 profile
+        const profilePath = `${home}/.profile`;
+        try {
+          if (execRef) await execRef(`source ${profilePath}`, cout);
+        } catch {
+          /* 没有 profile 也正常 */
+        }
       }
       await cout(`Welcome, ${user}\n`);
       return;

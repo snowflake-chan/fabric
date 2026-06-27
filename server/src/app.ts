@@ -101,6 +101,18 @@ createCLI(vfs, vfs, mountExternalStorage, cliUidRef, undefined, uidRef, privFs);
 // 传入 uidRef 供 RootFS 权限同步
 createTtyBridge(vfs, vfs, mountExternalStorage, uidRef, privFs);
 
-vfs.init().then(() => {
+vfs.init().then(async () => {
+  // 初始化 root 用户
+  const pwd = await privFs.readFile('/etc/passwd');
+  if (pwd === null || !pwd.split('\n').some((l) => l.startsWith('root:'))) {
+    await privFs.writeFile('/etc/passwd', 'root:x:0:0::/root:/bin/sh\n');
+    await privFs.chmod('/etc/passwd', 0o644);
+  }
+  await privFs.mkdir('/root').catch(() => {});
+  // 默认 profile
+  const profile = await privFs.readFile('/root/.profile');
+  if (profile === null) {
+    await privFs.writeFile('/root/.profile', 'export PATH=/bin\n');
+  }
   console.warn('✓ FabricVFS ready');
 });
