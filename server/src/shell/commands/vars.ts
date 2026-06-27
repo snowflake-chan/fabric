@@ -1,4 +1,42 @@
+import { type IFileSystem } from '../../fs/fabric-fs';
 import { type CmdEnv, type ShellHandler } from './types';
+
+/** 从 profile 中移除 export 行 */
+async function removeExport(
+  fs: IFileSystem,
+  profilePath: string,
+  name: string
+): Promise<void> {
+  const existing = (await fs.readFile(profilePath)) || '';
+  const lines = existing.split('\n').filter(Boolean);
+  const filtered = lines.filter(
+    (l) => !l.match(new RegExp(`^export\\s+${name}=`))
+  );
+  if (filtered.length !== lines.length)
+    await fs.writeFile(profilePath, `${filtered.join('\n')}\n`);
+}
+
+/** 持久化 export 到 profile 文件 */
+async function persistExport(
+  fs: IFileSystem,
+  profilePath: string,
+  name: string,
+  val: string
+): Promise<void> {
+  const existing = (await fs.readFile(profilePath)) || '';
+  const lines = existing.split('\n').filter(Boolean);
+  const newLine = `export ${name}=${val}`;
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].match(new RegExp(`^export\\s+${name}=`))) {
+      lines[i] = newLine;
+      found = true;
+      break;
+    }
+  }
+  if (!found) lines.push(newLine);
+  await fs.writeFile(profilePath, `${lines.join('\n')}\n`);
+}
 
 export function varCommands(
   env: CmdEnv,
@@ -17,7 +55,15 @@ export function varCommands(
         if (eq !== -1) {
           const name = a.slice(0, eq);
           const val = a.slice(eq + 1);
-          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name) && val) vars.set(name, val);
+          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name) && val) {
+            vars.set(name, val);
+            // 持久化到 ~/.profile
+            const home = vars.get('HOME');
+            if (home) {
+              const profilePath = `${home}/.profile`;
+              persistExport(env.fs, profilePath, name, val).catch(() => {});
+            }
+          }
         } else if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(a)) {
           if (!vars.has(a)) vars.set(a, '');
         }
@@ -25,8 +71,13 @@ export function varCommands(
     },
     async unset(_cout, name) {
       if (!name) throw new Error('Usage: unset <name>');
-      if (name === 'PATH') throw new Error('unset: PATH cannot be unset');
       vars.delete(name);
+      // 同时从 profile 中移除
+      const home = vars.get('HOME');
+      if (home) {
+        const profilePath = `${home}/.profile`;
+        removeExport(env.fs, profilePath, name).catch(() => {});
+      }
     },
     async env(cout) {
       for (const k of Array.from(vars.keys()).sort())

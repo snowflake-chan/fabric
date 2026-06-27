@@ -160,7 +160,7 @@ export function createTtyBridge(
     // 输出 prompt（~ 替换 home）
     const userName = typeof shell.user === 'function' ? await shell.user() : '';
     const cwd = shell.cwd();
-    const home = `/home/${userName}`;
+    const home = userName === 'root' ? '/root' : `/home/${userName}`;
     const display =
       cwd === home
         ? '~'

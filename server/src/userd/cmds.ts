@@ -287,5 +287,32 @@ export function createUserCommands(
     }
   };
 
-  return { whoami, id, su, sudo, useradd, userdel, passwd, login };
+  const logout: ShellHandler = async (cout) => {
+    uidRef.value = -1;
+    loggedInRef.value = false;
+    cwdRef.value = '/';
+    // 自动进入登录流程
+    if (execRef) await execRef('login', cout);
+  };
+  // exit = 登出 + 停止脚本执行
+  const exitcmd: ShellHandler = async () => {
+    uidRef.value = -1;
+    loggedInRef.value = false;
+    cwdRef.value = '/';
+    throw new Error('');
+  };
+
+  // login 不暴露给用户——uid=-1 时自动触发
+  return {
+    whoami,
+    id,
+    su,
+    sudo,
+    useradd,
+    userdel,
+    passwd,
+    login,
+    logout,
+    exit: exitcmd,
+  };
 }

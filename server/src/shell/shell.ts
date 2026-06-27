@@ -23,7 +23,6 @@ import {
   type ScriptContext,
 } from './scripts';
 import { createUserCommands } from '../userd/cmds';
-import { type UserEnv } from '../userd/cmds';
 
 export type { Cout };
 export type { ShellResult };
@@ -162,6 +161,10 @@ export function createShell(
     if (requestPassword !== undefined) currentRequestPassword = requestPassword;
     const trimmed = input.trim();
     if (!trimmed) return { ok: true };
+
+    // 未登录 → 自动进入登录流程
+    if (effectiveUidRef.value === -1 && trimmed !== 'login')
+      return exec('login', cout, depth, inputLine, print, requestPassword);
 
     // & 后台任务（非 &&）
     if (trimmed.endsWith('&') && !trimmed.endsWith('&&')) {
@@ -409,6 +412,7 @@ export function createShell(
     uid: () => effectiveUidRef.value,
     user: async () => {
       if (effectiveUidRef.value === 0) return 'root';
+      if (effectiveUidRef.value < 0) return 'nobody';
       const pwd = await fs.readFile('/etc/passwd');
       if (pwd !== null) {
         for (const l of pwd.split('\n')) {
