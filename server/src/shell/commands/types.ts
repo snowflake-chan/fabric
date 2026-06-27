@@ -41,4 +41,6 @@ export interface CmdEnv {
   inputLine?: () => Promise<string> | undefined;
   /** 请求密码输入（客户端隐藏输入内容） */
   requestPassword?: () => Promise<string>;
+  /** 带颜色输出（hex 格式如 #6B7B8D，或 'raw' 透传） */
+  colorPrint?: (text: string, color: string) => Promise<void>;
 }

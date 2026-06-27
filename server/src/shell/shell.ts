@@ -24,6 +24,70 @@ import {
 } from './scripts';
 import { createUserCommands } from '../userd/cmds';
 
+/** 算术求值（$(( expr )) 用） */
+function evalArithmetic(expr: string, vars: Map<string, string>): number {
+  const toks: string[] = [];
+  let buf = '';
+  for (const ch of expr) {
+    if ('+-*/()%'.includes(ch)) {
+      if (buf) {
+        toks.push(buf);
+        buf = '';
+      }
+      toks.push(ch);
+    } else if (ch === ' ') {
+      if (buf) {
+        toks.push(buf);
+        buf = '';
+      }
+    } else buf += ch;
+  }
+  if (buf) toks.push(buf);
+
+  const vals: number[] = [];
+  const ops: string[] = [];
+  const prec: Record<string, number> = {
+    '+': 1,
+    '-': 1,
+    '*': 2,
+    '/': 2,
+    '%': 2,
+  };
+
+  function apply(): void {
+    const op = ops.pop()!;
+    const b = vals.pop()!;
+    const a = vals.pop()!;
+    if (op === '+') vals.push(a + b);
+    else if (op === '-') vals.push(a - b);
+    else if (op === '*') vals.push(a * b);
+    else if (op === '/') vals.push(b === 0 ? 0 : Math.floor(a / b));
+    else if (op === '%') vals.push(b === 0 ? 0 : a % b);
+  }
+
+  for (const t of toks) {
+    if (t === '(') {
+      ops.push(t);
+    } else if (t === ')') {
+      while (ops.length && ops[ops.length - 1] !== '(') apply();
+      ops.pop();
+    } else if (t in prec) {
+      while (
+        ops.length &&
+        ops[ops.length - 1] !== '(' &&
+        prec[ops[ops.length - 1]] >= prec[t]
+      )
+        apply();
+      ops.push(t);
+    } else {
+      const v = vars.has(t) ? parseInt(vars.get(t)!) : parseInt(t);
+      vals.push(isNaN(v) ? 0 : v);
+    }
+  }
+  while (ops.length) apply();
+  return vals[0] || 0;
+}
+
 export type { Cout };
 export type { ShellResult };
 
@@ -39,10 +103,10 @@ export function createShell(
   privFs?: IFileSystem
 ) {
   const cwdRef = { value: '/' };
-  const hasUsers = !!uidRef;
-  // handlers 直接操作 sharedUidRef，提权即时生效到 RootFS
+  const hasUsers = !!uidRef || !!sharedUidRef;
   if (!uidRef) uidRef = { value: 0 };
-  const effectiveUidRef = sharedUidRef || uidRef;
+  // 每个 shell 用自己的 uidRef，RootFS 用 sharedUidRef（exec 入口同步）
+  const shellUidRef = uidRef;
   const loggedInRef = hasUsers ? { value: false } : undefined;
   const history: string[] = [];
   const MAX_HISTORY = 100;
@@ -91,7 +155,7 @@ export function createShell(
     fs,
     vfs,
     cwdRef,
-    uidRef: effectiveUidRef,
+    uidRef: shellUidRef,
     loggedInRef,
     vars,
     pipeInputRef,
@@ -107,13 +171,16 @@ export function createShell(
       if (currentRequestPassword) return currentRequestPassword();
       return '';
     },
+    colorPrint: async (text, color) => {
+      if (currentColorPrint) await currentColorPrint(text, color);
+    },
     execRef: exec,
   });
   if (hasUsers) {
     const userCmds = createUserCommands(
       {
         fs,
-        uidRef: effectiveUidRef,
+        uidRef: shellUidRef,
         cwdRef,
         loggedInRef: loggedInRef!,
         vars,
@@ -137,13 +204,16 @@ export function createShell(
   let currentInputLine: (() => Promise<string>) | undefined;
   let currentPrint: ((text: string) => Promise<void>) | undefined;
   let currentRequestPassword: (() => Promise<string>) | undefined;
+  let currentColorPrint:
+    | ((text: string, color: string) => Promise<void>)
+    | undefined;
 
   // 脚本上下文
   const scriptCtx: ScriptContext = {
     fs,
     cwdRef,
     vars,
-    uidRef: effectiveUidRef,
+    uidRef: shellUidRef,
     exec,
     tokenize,
   };
@@ -154,16 +224,21 @@ export function createShell(
     depth = 0,
     inputLine?: () => Promise<string>,
     print?: (text: string) => Promise<void>,
-    requestPassword?: () => Promise<string>
+    requestPassword?: () => Promise<string>,
+    colorPrint?: (text: string, color: string) => Promise<void>,
+    quietInputLine?: () => Promise<string>
   ): Promise<ShellResult> {
     if (inputLine !== undefined) currentInputLine = inputLine;
     if (print !== undefined) currentPrint = print;
     if (requestPassword !== undefined) currentRequestPassword = requestPassword;
+    if (colorPrint !== undefined) currentColorPrint = colorPrint;
+    // 同步 RootFS 权限上下文
+    if (sharedUidRef) sharedUidRef.value = shellUidRef.value;
     const trimmed = input.trim();
     if (!trimmed) return { ok: true };
 
     // 未登录 → 自动进入登录流程
-    if (effectiveUidRef.value === -1 && trimmed !== 'login')
+    if (shellUidRef.value === -1 && trimmed !== 'login')
       return exec('login', cout, depth, inputLine, print, requestPassword);
 
     // & 后台任务（非 &&）
@@ -289,12 +364,16 @@ export function createShell(
       return { ok: true };
     }
 
-    // 变量展开
+    // 变量展开 + 算术展开
     let expandedLine = trimmed;
     if (vars.size > 0) {
       for (const [k, v] of vars)
         expandedLine = expandedLine.replaceAll(`$${k}`, v);
     }
+    // $(( expr )) 算术求值
+    expandedLine = expandedLine.replace(/\$\(\((.*?)\)\)/g, (_, expr) => {
+      return String(evalArithmetic(expr.trim(), vars));
+    });
 
     const tokens = tokenize(expandedLine);
     const rawName = tokens[0];
@@ -331,6 +410,25 @@ export function createShell(
       runArgs = cmdArgs
         .slice(0, inRedirIdx)
         .concat(cmdArgs.slice(inRedirIdx + 2));
+    }
+
+    // << EOF heredoc（客户端不 echo）
+    const heredocIdx = runArgs.indexOf('<<');
+    if (heredocIdx !== -1 && inputLine) {
+      const delim = runArgs[heredocIdx + 1];
+      if (!delim)
+        return { ok: false, error: 'syntax error: << without delimiter' };
+      const lines: string[] = [];
+      const hdInput = quietInputLine || inputLine;
+      while (true) {
+        const l = (await hdInput()) || '';
+        if (l === delim) break;
+        lines.push(l);
+      }
+      pipeInputRef.value = lines.join('\n');
+      runArgs = runArgs
+        .slice(0, heredocIdx)
+        .concat(runArgs.slice(heredocIdx + 2));
     }
 
     // > / >> 重定向
@@ -409,19 +507,19 @@ export function createShell(
     exec,
     history: history as readonly string[],
     cwd: () => cwdRef.value,
-    uid: () => effectiveUidRef.value,
+    uid: () => shellUidRef.value,
     user: async () => {
-      if (effectiveUidRef.value === 0) return 'root';
-      if (effectiveUidRef.value < 0) return 'nobody';
+      if (shellUidRef.value === 0) return 'root';
+      if (shellUidRef.value < 0) return 'nobody';
       const pwd = await fs.readFile('/etc/passwd');
       if (pwd !== null) {
         for (const l of pwd.split('\n')) {
           const p = l.split(':');
-          if (p.length >= 3 && parseInt(p[2]) === effectiveUidRef.value)
+          if (p.length >= 3 && parseInt(p[2]) === shellUidRef.value)
             return p[0];
         }
       }
-      return String(effectiveUidRef.value);
+      return String(shellUidRef.value);
     },
   };
 }

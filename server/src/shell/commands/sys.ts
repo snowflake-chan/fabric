@@ -39,6 +39,12 @@ export function sysCommands(
       }
       throw new Error(`sock: unknown subcommand '${subcmd}'`);
     },
+    async color(cout, hex, ...text) {
+      if (!hex || !text.length) throw new Error('Usage: color <hex> <text>');
+      const c = hex.startsWith('#') ? hex : `#${hex}`;
+      if (env.colorPrint) await env.colorPrint(text.join(' '), c);
+      else await cout(text.join(' '));
+    },
     async help(cout) {
       const names = Object.keys(getHandlers()).sort();
       for (const n of names) await cout(n);

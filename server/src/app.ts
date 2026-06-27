@@ -73,11 +73,18 @@ sysFs.registerDevice('/players', {
 });
 
 const playerJoinSock = sysFs.registerSocket('/player-join');
-vfs.mount('/sys', sysFs);
 
 world.onPlayerJoin(({ entity }) => {
   playerJoinSock.push(`${entity.player.userId}\t${entity.player.name}`);
 });
+
+const tickSock = sysFs.registerSocket('/tick');
+
+world.onTick(() => {
+  tickSock.push('');
+});
+
+vfs.mount('/sys', sysFs);
 
 // mount <path> <storageId> — 挂载任意 GameDataStorage
 async function mountExternalStorage(

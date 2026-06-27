@@ -84,6 +84,14 @@ export function createTtyBridge(
       });
     };
 
+    // heredoc 静默输入（客户端不 echo）
+    const quietInputLine = async (): Promise<string> => {
+      remoteChannel.sendClientEvent(entity, { type: 'tty-noecho' });
+      const line = await inputLine();
+      remoteChannel.sendClientEvent(entity, { type: 'tty-echo' });
+      return line;
+    };
+
     // 流式 cout
     const BATCH_SIZE = 5;
     const FLUSH_MS = 50;
@@ -131,13 +139,28 @@ export function createTtyBridge(
       return inputLine();
     };
 
+    const colorPrint = async (text: string, color: string) => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      flushBatch();
+      remoteChannel.sendClientEvent(entity, {
+        type: 'tty-stream',
+        data: text,
+        style: color,
+      });
+    };
+
     const result = await shell.exec(
       msg.cmd,
       cout,
       0,
       inputLine,
       print,
-      requestPassword
+      requestPassword,
+      colorPrint,
+      quietInputLine
     );
 
     if (flushTimer) {

@@ -14,7 +14,15 @@ export function tokenize(s: string): string[] {
       const q = s[i];
       i++;
       let b = '';
-      while (i < s.length && s[i] !== q) b += s[i++];
+      while (i < s.length) {
+        if (s[i] === '\\' && q === '"' && s[i + 1] === '"') {
+          b += '"';
+          i += 2;
+          continue;
+        }
+        if (s[i] === q) break;
+        b += s[i++];
+      }
       i++;
       tokens.push(b);
       continue;
@@ -33,6 +41,11 @@ export function splitSemicolon(s: string): string[] {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (q) {
+      if (c === '\\' && q === '"' && s[i + 1] === '"') {
+        cur += '"';
+        i++;
+        continue;
+      }
       if (c === q) q = null;
       cur += c;
     } else if (c === '"' || c === "'") {
@@ -60,6 +73,11 @@ export function parseLogical(s: string): LogicalStep[] {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (q) {
+      if (c === '\\' && q === '"' && s[i + 1] === '"') {
+        cur += '"';
+        i++;
+        continue;
+      }
       if (c === q) q = null;
       cur += c;
     } else if (c === '"' || c === "'") {
@@ -89,6 +107,11 @@ export function parsePipe(s: string): string[] {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (q) {
+      if (c === '\\' && q === '"' && s[i + 1] === '"') {
+        cur += '"';
+        i++;
+        continue;
+      }
       if (c === q) q = null;
       cur += c;
     } else if (c === '"' || c === "'") {

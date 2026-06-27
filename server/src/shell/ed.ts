@@ -151,6 +151,23 @@ export function edHandler(env: EdEnv): ShellHandler {
           }
           break;
         }
+        case 'c': {
+          const at = addr ? addr.start : cur;
+          const lines: string[] = [];
+          while (true) {
+            if (buf.length + lines.length >= MAX_BUF) {
+              await cout('?MAXBUF');
+              break;
+            }
+            const l = await inputLine();
+            if (l === '.' || l === undefined) break;
+            lines.push(l);
+          }
+          buf.splice(at - 1, addr ? addr.end - addr.start + 1 : 1, ...lines);
+          cur = at + lines.length - 1;
+          modified = true;
+          break;
+        }
         case 'a': {
           const at = addr ? addr.end : cur;
           let cnt = 0;

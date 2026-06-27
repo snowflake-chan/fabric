@@ -64,6 +64,7 @@ export class TtyUI {
   private _visible = true;
   private passwordMode = false;
   private passwordBuf = '';
+  private noEcho = false;
 
   private dragStartX = 0;
   private dragStartY = 0;
@@ -250,7 +251,12 @@ export class TtyUI {
         return `<font color="#ccc">${this.escXml(l)}</font>`;
       })
       .join('\n');
-    this.textDisplay.textContent = rich;
+    try {
+      this.textDisplay.textContent = rich;
+    } catch {
+      // XML 格式错误时降级为纯文本
+      this.textDisplay.textContent = `<font color="#ccc">${this.escXml(this.lines[this.lines.length - 1] || '')}</font>`;
+    }
     this.scrollBox.scrollPosition.y = 999999;
   }
 
@@ -320,7 +326,7 @@ export class TtyUI {
       }, 100);
       return;
     }
-    this.stream(`${cmd}\n`);
+    if (!this.noEcho) this.stream(`${cmd}\n`);
     remoteChannel.sendServerEvent({ type: 'tty-cmd', cmd });
     setTimeout(() => {
       this.inputField.focus();
@@ -343,6 +349,15 @@ export class TtyUI {
       if (msg?.type === 'tty-password') {
         this.passwordMode = true;
         this.passwordBuf = '';
+        return;
+      }
+
+      if (msg?.type === 'tty-noecho') {
+        this.noEcho = true;
+        return;
+      }
+      if (msg?.type === 'tty-echo') {
+        this.noEcho = false;
         return;
       }
 
